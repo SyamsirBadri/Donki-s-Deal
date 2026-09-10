@@ -9,7 +9,7 @@ const {
   SUPABASE_SERVICE_KEY,
 } = process.env;
 
-const DEAL_SCORE_THRESHOLD = 1; // Set back to 8 once history builds up
+const DEAL_SCORE_THRESHOLD = 0.5; // Set back to 8 once history builds up
 const NOTIFICATION_COOLDOWN_HOURS = 24;
 
 // ─── HTTP Helper ───────────────────────────────────────────────
