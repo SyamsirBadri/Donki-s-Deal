@@ -116,17 +116,17 @@ async function getWishlist() {
 
 // ─── CheapShark ────────────────────────────────────────────────
 async function getGamePrice(appId) {
-  // Search by steamAppID
   const url = `https://www.cheapshark.com/api/1.0/games?steamAppID=${appId}&pageSize=1`;
   const data = await fetchJson(url);
-  if (!data || data.length === 0) return null;
+  if (!Array.isArray(data) || data.length === 0) return null;
   const game = data[0];
+  if (!game || !game.title) return null;
   return {
     title: game.title,
     cheapest: game.cheapest,
     cheapestDealID: game.cheapestDealID,
   };
-}
+}   
 
 async function getDealDetails(dealID) {
   const url = `https://www.cheapshark.com/api/1.0/deals?id=${dealID}`;
@@ -138,7 +138,7 @@ async function getDealDetails(dealID) {
     salePrice: data.salePrice,
     normalPrice: data.normalPrice,
     savings: data.savings,
-    lastChange: new Date(data.lastChange * 1000).toISOString(),
+    lastChange: data.lastChange ? new Date(data.lastChange * 1000).toISOString() : null,   
     url: data.url,
   };
 }
@@ -146,8 +146,8 @@ async function getDealDetails(dealID) {
 async function getFreeGames() {
   const url = `https://www.cheapshark.com/api/1.0/deals?onSale=1&lowerPrice=0&upperPrice=0&pageSize=50`;
   const data = await fetchJson(url);
-  return data || [];
-}
+  return Array.isArray(data) ? data : [];
+}   
 
 // ─── Deal Score ────────────────────────────────────────────────
 function calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist) {
@@ -254,7 +254,7 @@ async function main() {
     }
 
     // Be polite: small delay between API calls
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 1000));
   }
 
   // 5. Check free games
