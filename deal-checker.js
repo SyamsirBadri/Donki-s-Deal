@@ -183,13 +183,14 @@ async function main() {
 
   // 2. Get purchased games (to skip)
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
-  const purchasedSet = new Set(purchased.map((r) => r.app_id));
+  console.log('Supabase purchased response:', JSON.stringify(purchased).slice(0, 200));
+  const purchasedSet = new Set(Array.isArray(purchased) ? purchased.map((r) => r.app_id) : []);   
 
   // 3. Get last notification times (for cooldown)
   const lastNotified = await supabaseQuery('last_notified', { select: 'app_id,last_notification' });
   const cooldownMap = new Map(
-    lastNotified.map((r) => [r.app_id, new Date(r.last_notification)])
-  );
+  Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
+  );   
 
   // 4. Check each game
   const newSnapshots = [];
@@ -260,7 +261,7 @@ async function main() {
   try {
     const freeGames = await getFreeGames();
     const seenFree = await supabaseQuery('free_games_seen', { select: 'app_id' });
-    const seenSet = new Set(seenFree.map((r) => r.app_id));
+    const seenSet = new Set(Array.isArray(seenFree) ? seenFree.map((r) => r.app_id) : []);   
 
     for (const fg of freeGames) {
       const appId = fg.steamAppID;
