@@ -9,7 +9,7 @@ const {
   SUPABASE_SERVICE_KEY,
 } = process.env;
 
-const DEAL_SCORE_THRESHOLD = 8;
+const DEAL_SCORE_THRESHOLD = 1;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
 
 // ─── HTTP Helper ───────────────────────────────────────────────
@@ -215,7 +215,7 @@ async function main() {
       // Get all-time low from CheapShark (it's in the game search response sometimes,
       // but for simplicity we use the current cheapest as a proxy for now.
       // In a future iteration, you could store history and compute it.)
-      const allTimeLow = currentPrice; // TODO: compute from history after first 30 days
+      const allTimeLow = Math.min(currentPrice, originalPrice * 0.5); // TODO: compute from history after first 30 days
 
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
       const score = calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist);
