@@ -11,12 +11,31 @@ const {
 
 const DEAL_SCORE_THRESHOLD = 4;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
+const REQUEST_TIMEOUT_MS = 10000;
+const WISHLIST_REQUEST_DELAY_MS = 1000;
 
-// ─── HTTP Helper ───────────────────────────────────────────────
+// ─── Startup validation ────────────────────────────────────────
+function assertEnv() {
+  const required = {
+    STEAM_API_KEY,
+    STEAM_ID,
+    DISCORD_WEBHOOK_URL,
+    SUPABASE_URL,
+    SUPABASE_SERVICE_KEY,
+  };
+  const missing = Object.entries(required)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variable(s): ${missing.join(', ')}`);
+  }
+}
+
+// ─── HTTP Helpers ──────────────────────────────────────────────
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    mod.get(url, {
+    const req = mod.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json',
@@ -25,10 +44,16 @@ function fetchJson(url) {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`HTTP ${res.statusCode} from ${url}: ${data.slice(0, 200)}`));
+          return;
+        }
         try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error(`JSON parse error: ${data.slice(0, 200)}`)); }
+        catch (e) { reject(new Error(`JSON parse error from ${url}: ${data.slice(0, 200)}`)); }
       });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Request timed out: ${url}`)));
   });
 }
 
@@ -49,56 +74,62 @@ function postJson(url, body) {
       res.on('end', () => resolve({ status: res.statusCode, body: resData }));
     });
     req.on('error', reject);
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Request timed out: ${url}`)));
     req.write(data);
     req.end();
   });
 }
 
-// ─── Supabase Helper ───────────────────────────────────────────
-async function supabaseQuery(table, { select = '*', where = '' } = {}) {
-  const url = `${SUPABASE_URL}/rest/v1/${table}${where ? `?${where}` : ''}`;
+// ─── Supabase Helpers ──────────────────────────────────────────
+function supabaseRequest(method, path, { body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
+    const url = `${SUPABASE_URL}/rest/v1/${path}`;
+    const data = body !== undefined ? JSON.stringify(body) : null;
     const req = https.request(url, {
-      method: 'GET',
+      method,
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
         'apikey': SUPABASE_SERVICE_KEY,
-        'Prefer': 'return=representation',
-      },
-    }, (res) => {
-      let data = '';
-      res.on('data', (c) => (data += c));
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { resolve(data); }
-      });
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-async function supabaseInsert(table, rows) {
-  const url = `${SUPABASE_URL}/rest/v1/${table}`;
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(rows);
-    const req = https.request(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-        'apikey': SUPABASE_SERVICE_KEY,
-        'Prefer': 'return=minimal',
+        ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}),
+        ...headers,
       },
     }, (res) => {
       let resData = '';
       res.on('data', (c) => (resData += c));
-      res.on('end', () => resolve({ status: res.statusCode }));
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`Supabase ${method} ${path} -> HTTP ${res.statusCode}: ${resData.slice(0, 300)}`));
+          return;
+        }
+        if (!resData) { resolve(null); return; }
+        try { resolve(JSON.parse(resData)); }
+        catch { resolve(resData); }
+      });
     });
     req.on('error', reject);
-    req.write(data);
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Supabase request timed out: ${path}`)));
+    if (data) req.write(data);
     req.end();
+  });
+}
+
+async function supabaseQuery(table, { select = '*', where = '' } = {}) {
+  const qs = new URLSearchParams({ select });
+  const path = `${table}?${qs.toString()}${where ? `&${where}` : ''}`;
+  return supabaseRequest('GET', path, { headers: { 'Prefer': 'return=representation' } });
+}
+
+async function supabaseInsert(table, rows) {
+  return supabaseRequest('POST', table, { body: rows, headers: { 'Prefer': 'return=minimal' } });
+}
+
+// Upsert avoids piling up duplicate rows for the same app_id on every alert/sighting.
+async function supabaseUpsert(table, rows, conflictColumn) {
+  const path = `${table}?on_conflict=${conflictColumn}`;
+  return supabaseRequest('POST', path, {
+    body: rows,
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
   });
 }
 
@@ -108,10 +139,12 @@ async function getWishlist() {
   const data = await fetchJson(url);
   const items = data?.response?.items || [];
   console.log(`Wishlist: ${items.length} games`);
-  return items.map((item) => ({
-    appId: item.appid,
-    addedAt: new Date(item.date_added * 1000).toISOString(),
-  })).filter((i) => i.appId);
+  return items
+    .map((item) => ({
+      appId: item.appid,
+      addedAt: new Date(item.date_added * 1000).toISOString(),
+    }))
+    .filter((i) => i.appId);
 }
 
 // ─── Steam Store Price (Malaysia) ──────────────────────────────
@@ -122,38 +155,65 @@ async function getGamePrice(appId) {
   if (!entry || !entry.data || !entry.data.name) return null;
 
   const priceOverview = entry.data.price_overview;
-  const basePrice = entry.data.price;
+  if (!priceOverview) return null; // e.g. free-to-play or delisted — nothing to price
 
-  let currentPrice, originalPrice, discountPct;
+  const currentPrice = priceOverview.final / 100;
+  const originalPrice = priceOverview.initial / 100;
+  const discountPct = priceOverview.discount_percent || 0;
 
-  if (priceOverview) {
-    currentPrice = priceOverview.final / 100;
-    originalPrice = priceOverview.initial / 100;
-    discountPct = priceOverview.discount_percent || 0;
-  } else if (basePrice) {
-    currentPrice = basePrice.final / 100;
-    originalPrice = basePrice.initial / 100;
-    discountPct = basePrice.discount_percent || 0;
-  } else {
-    return null;
-  }
-
-  if (isNaN(currentPrice) || currentPrice <= 0) return null;
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return null;
+  if (!Number.isFinite(originalPrice) || originalPrice <= 0) return null;
 
   return {
     title: entry.data.name,
     cheapest: currentPrice,
-    originalPrice: originalPrice,
-    discountPct: discountPct,
+    originalPrice,
+    discountPct,
     isOnSale: discountPct > 0,
     storeName: 'Steam',
     url: `https://store.steampowered.com/app/${appId}`,
   };
-}   
+}
+
+// ─── Historical Low Prices ─────────────────────────────────────
+// Pulls the lowest recorded current_price per app_id from price_snapshots,
+// scoped to the given app IDs, so "all-time low" is real history rather
+// than always equal to today's price.
+async function getHistoricalLows(appIds) {
+  const map = new Map();
+  if (appIds.length === 0) return map;
+
+  const idsFilter = `app_id=in.(${appIds.join(',')})`;
+  const rows = await supabaseQuery('price_snapshots', {
+    select: 'app_id,current_price',
+    where: idsFilter,
+  });
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const prev = map.get(row.app_id);
+    if (prev === undefined || row.current_price < prev) {
+      map.set(row.app_id, row.current_price);
+    }
+  }
+  return map;
+}
 
 // ─── Free Games (stub) ─────────────────────────────────────────
 async function getFreeGames() {
   return [];
+}
+
+// ─── Deal Scoring ──────────────────────────────────────────────
+// Same weighting as the original: price-vs-all-time-low dominates (7),
+// discount-vs-original matters some (2), time spent on wishlist adds
+// a little patience credit (1). Guards against div-by-zero producing NaN.
+function calculateDealScore({ currentPrice, originalPrice, allTimeLow, daysOnWishlist }) {
+  const priceFactor = allTimeLow > 0 ? (1 - currentPrice / allTimeLow) * 7 : 0;
+  const discountFactor = originalPrice > 0 ? (1 - currentPrice / originalPrice) * 2 : 0;
+  const patienceFactor = Math.min(daysOnWishlist / 365, 1) * 1;
+  const rawScore = priceFactor + discountFactor + patienceFactor;
+  const score = Math.max(0, Math.min(10, rawScore));
+  return { score, priceFactor, discountFactor, patienceFactor };
 }
 
 // ─── Discord Notification ──────────────────────────────────────
@@ -167,6 +227,7 @@ async function sendDiscordAlert(content, embeds = []) {
 
 // ─── Main ──────────────────────────────────────────────────────
 async function main() {
+  assertEnv();
   console.log('Deal Radar: Starting check...');
   const now = new Date();
 
@@ -182,6 +243,7 @@ async function main() {
   // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
   const purchasedSet = new Set(Array.isArray(purchased) ? purchased.map((r) => r.app_id) : []);
+  const toCheck = wishlist.filter((item) => !purchasedSet.has(item.appId));
 
   // 3. Get last notification times
   const lastNotified = await supabaseQuery('last_notified', { select: 'app_id,last_notification' });
@@ -189,13 +251,14 @@ async function main() {
     Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
   );
 
+  // 4. Get historical lows in one bulk query instead of per-game
+  const historicalLows = await getHistoricalLows(toCheck.map((i) => i.appId));
+
   const newSnapshots = [];
   const alerts = [];
 
-  // 4. Check each game
-  for (const item of wishlist) {
-    if (purchasedSet.has(item.appId)) continue;
-
+  // 5. Check each game
+  for (const item of toCheck) {
     try {
       const game = await getGamePrice(item.appId);
       if (!game) continue;
@@ -203,17 +266,19 @@ async function main() {
       const currentPrice = game.cheapest;
       const originalPrice = game.originalPrice;
       const discountPct = game.discountPct;
-      const allTimeLow = currentPrice;
+      const priorLow = historicalLows.get(item.appId);
+      const allTimeLow = priorLow !== undefined ? Math.min(currentPrice, priorLow) : currentPrice;
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
 
-      // Inline score calculation (no separate function)
-      const priceFactor = (1 - currentPrice / allTimeLow) * 7;
-      const discountFactor = (1 - currentPrice / originalPrice) * 2;
-      const patienceFactor = Math.min(daysOnWishlist / 365, 1) * 1;
-      const score = Math.max(0, Math.min(10, priceFactor + discountFactor + patienceFactor));
+      const { score, priceFactor, discountFactor, patienceFactor } = calculateDealScore({
+        currentPrice, originalPrice, allTimeLow, daysOnWishlist,
+      });
 
-      // Log every game so we can see what's happening
-      console.log(`  ${game.title}: score=${score.toFixed(2)} [pf=${priceFactor.toFixed(2)}, df=${discountFactor.toFixed(2)}, pt=${patienceFactor.toFixed(2)}] price=${currentPrice} orig=${originalPrice} disc=${discountPct}%`);
+      console.log(
+        `  ${game.title}: score=${score.toFixed(2)} ` +
+        `[pf=${priceFactor.toFixed(2)}, df=${discountFactor.toFixed(2)}, pt=${patienceFactor.toFixed(2)}] ` +
+        `price=${currentPrice} orig=${originalPrice} atl=${allTimeLow} disc=${discountPct}%`
+      );
 
       newSnapshots.push({
         app_id: item.appId,
@@ -231,7 +296,7 @@ async function main() {
       const lastNotif = cooldownMap.get(item.appId);
       const inCooldown = lastNotif && (now - lastNotif) < NOTIFICATION_COOLDOWN_HOURS * 3600000;
 
-      if (score >= DEAL_SCORE_THRESHOLD && !inCooldown && discountPct > 0) {   
+      if (score >= DEAL_SCORE_THRESHOLD && !inCooldown && discountPct > 0) {
         alerts.push({
           appId: item.appId,
           title: game.title,
@@ -248,10 +313,10 @@ async function main() {
       console.warn(`Error checking app ${item.appId}: ${e.message}`);
     }
 
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
   }
 
-  // 5. Check free games
+  // 6. Check free games
   try {
     const freeGames = await getFreeGames();
     const seenFree = await supabaseQuery('free_games_seen', { select: 'app_id' });
@@ -263,19 +328,19 @@ async function main() {
       await sendDiscordAlert(
         `FREE GAME: ${fg.title}\nAvailable on ${fg.storeName}. [Claim Now](${fg.url})`
       );
-      await supabaseInsert('free_games_seen', [{ app_id: appId, first_seen: now.toISOString() }]);
+      await supabaseUpsert('free_games_seen', [{ app_id: appId, first_seen: now.toISOString() }], 'app_id');
     }
   } catch (e) {
     console.warn('Free games check failed:', e.message);
   }
 
-  // 6. Insert snapshots
+  // 7. Insert snapshots (append-only history — insert is correct here, not upsert)
   if (newSnapshots.length > 0) {
     await supabaseInsert('price_snapshots', newSnapshots);
     console.log(`Inserted ${newSnapshots.length} snapshots`);
   }
 
-  // 7. Send deal alerts
+  // 8. Send deal alerts
   for (const alert of alerts) {
     const embed = {
       title: `DEAL: ${alert.title}`,
@@ -288,8 +353,12 @@ async function main() {
       color: 0x00ff00,
       url: alert.url,
     };
-    await sendDiscordAlert(`Deal Score ${alert.score.toFixed(2)}`, [embed]);
-    await supabaseInsert('last_notified', [{ app_id: alert.appId, last_notification: now.toISOString() }]);
+    try {
+      await sendDiscordAlert(`Deal Score ${alert.score.toFixed(2)}`, [embed]);
+      await supabaseUpsert('last_notified', [{ app_id: alert.appId, last_notification: now.toISOString() }], 'app_id');
+    } catch (e) {
+      console.warn(`Failed to send/record alert for ${alert.title}: ${e.message}`);
+    }
   }
 
   console.log(`Done. ${alerts.length} deal alert(s) sent.`);
@@ -298,4 +367,4 @@ async function main() {
 main().catch((e) => {
   console.error('Fatal:', e);
   process.exit(1);
-});   
+});
