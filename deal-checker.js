@@ -161,13 +161,13 @@ async function lookupItadGame(appId) {
 
   const data = await fetchJson(url);
 
-  if (!data || !data.id) {
+  if (!data?.found || !data?.game?.id) {
     return null;
   }
 
   return {
-    id: data.id,
-    title: data.title || null,
+    id: data.game.id,
+    title: data.game.title || null,
   };
 }
 
