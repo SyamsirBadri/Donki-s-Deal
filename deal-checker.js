@@ -206,13 +206,33 @@ async function getFreeGames() {
 // ─── Deal Scoring ──────────────────────────────────────────────
 // Same weighting as the original: price-vs-all-time-low dominates (7),
 // discount-vs-original matters some (2), time spent on wishlist adds
-// a little patience credit (1). Guards against div-by-zero producing NaN.
+// a little patience credit (1).
+//
+// priceFactor is scaled against THIS GAME's own range (original price
+// down to its all-time low), not an unbounded ratio. That keeps it in
+// [0, 7]: 7 when today's price ties the all-time low, 0 when it's at
+// (or above) full price, and a smooth reward in between. Because
+// allTimeLow = min(currentPrice, priorLow) by construction, currentPrice
+// can never be below allTimeLow — a naive (1 - currentPrice/allTimeLow)
+// ratio is therefore always <= 0 and can never reward a real discount,
+// which is why every score floored at 0 before this fix.
 function calculateDealScore({ currentPrice, originalPrice, allTimeLow, daysOnWishlist }) {
-  const priceFactor = allTimeLow > 0 ? (1 - currentPrice / allTimeLow) * 7 : 0;
+  const priceRange = originalPrice - allTimeLow;
+  let priceFactor;
+  if (priceRange > 0) {
+    const positionInRange = (currentPrice - allTimeLow) / priceRange; // 0 = at ATL, 1 = at full price
+    priceFactor = Math.max(0, Math.min(1, 1 - positionInRange)) * 7;
+  } else {
+    // Degenerate case: original price isn't above the all-time low (e.g. a
+    // base-price cut). Full credit if today's price is at/under that low.
+    priceFactor = currentPrice <= allTimeLow ? 7 : 0;
+  }
+
   const discountFactor = originalPrice > 0 ? (1 - currentPrice / originalPrice) * 2 : 0;
   const patienceFactor = Math.min(daysOnWishlist / 365, 1) * 1;
+
   const rawScore = priceFactor + discountFactor + patienceFactor;
-  const score = Math.max(0, Math.min(10, rawScore));
+  const score = Math.max(0, Math.min(10, rawScore)); // safety net; shouldn't clip in normal cases now
   return { score, priceFactor, discountFactor, patienceFactor };
 }
 
