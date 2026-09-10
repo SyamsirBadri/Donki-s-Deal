@@ -138,13 +138,68 @@ async function getWishlist() {
   const url = `https://api.steampowered.com/IWishlistService/GetWishlist/v1?steamid=${STEAM_ID}&key=${STEAM_API_KEY}`;
   const data = await fetchJson(url);
   const items = data?.response?.items || [];
+
   console.log(`Wishlist: ${items.length} games`);
+
   return items
     .map((item) => ({
       appId: item.appid,
-      addedAt: new Date(item.date_added * 1000).toISOString(),
+      addedAt: item.date_added
+        ? new Date(item.date_added * 1000).toISOString()
+        : null,
     }))
     .filter((i) => i.appId);
+}
+
+// ─── Wishlist Database Sync ───────────────────────────────────
+async function syncWishlistToDatabase(wishlist) {
+  if (wishlist.length === 0) {
+    console.log('Wishlist is empty — nothing to sync.');
+    return;
+  }
+
+  console.log(`Syncing ${wishlist.length} wishlist games to Supabase...`);
+
+  const rows = [];
+  let failed = 0;
+
+  for (const item of wishlist) {
+    try {
+      // Steam's wishlist endpoint gives us the app ID and date added,
+      // but not the game title. Reuse the existing Steam Store API
+      // helper to retrieve the title.
+      const game = await getGamePrice(item.appId);
+
+      rows.push({
+        app_id: item.appId,
+        game_name: game?.title || `App ${item.appId}`,
+        added_at: item.addedAt,
+        last_synced: new Date().toISOString(),
+      });
+
+      console.log(
+        `  Prepared: ${game?.title || `App ${item.appId}`}`
+      );
+    } catch (e) {
+      failed++;
+      console.warn(
+        `  Failed to prepare wishlist app ${item.appId}: ${e.message}`
+      );
+    }
+
+    await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
+  }
+
+  if (rows.length === 0) {
+    console.log('No wishlist rows could be prepared.');
+    return;
+  }
+
+  await supabaseUpsert('wishlist', rows, 'app_id');
+
+  console.log(
+    `Wishlist sync complete: ${rows.length} synced, ${failed} failed`
+  );
 }
 
 // ─── Steam Store Price (Malaysia) ──────────────────────────────
