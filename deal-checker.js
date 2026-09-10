@@ -152,6 +152,25 @@ async function getWishlist() {
     .filter((i) => i.appId);
 }
 
+// ─── ITAD Game Lookup ─────────────────────────────────────────
+async function lookupItadGame(appId) {
+  const url =
+    `https://api.isthereanydeal.com/games/lookup/v1` +
+    `?key=${encodeURIComponent(ITAD_API_KEY)}` +
+    `&appid=${encodeURIComponent(appId)}`;
+
+  const data = await fetchJson(url);
+
+  if (!data || !data.id) {
+    return null;
+  }
+
+  return {
+    id: data.id,
+    title: data.title || null,
+  };
+}
+
 // ─── Wishlist Database Sync ───────────────────────────────────
 async function syncWishlistToDatabase(wishlist) {
   if (wishlist.length === 0) {
