@@ -116,37 +116,72 @@ async function getWishlist() {
 
 // ─── CheapShark ────────────────────────────────────────────────
 async function getGamePrice(appId) {
-  const url = `https://www.cheapshark.com/api/1.0/games?steamAppID=${appId}&pageSize=1`;
+  const url = `https://store.steampowered.com/api/appdetails?appids=${appId}`;
   const data = await fetchJson(url);
-  if (!Array.isArray(data) || data.length === 0) return null;
-  const game = data[0];
-  if (!game || !game.title) return null;
+  const entry = data?.[appId];
+  if (!entry || !entry.data || !entry.data.name) return null;
+
+  const priceOverview = entry.data.price_overview;
+  const currentPrice = priceOverview ? priceOverview.final / 100 : null;
+  const originalPrice = priceOverview ? priceOverview.initial / 100 : null;
+  const discountPct = priceOverview ? priceOverview.discount_percent : 0;
+
   return {
-    title: game.title,
-    cheapest: game.cheapest,
-    cheapestDealID: game.cheapestDealID,
+    title: entry.data.name,
+    cheapest: currentPrice,
+    originalPrice: originalPrice || currentPrice,
+    discountPct: discountPct,
+    isOnSale: discountPct > 0,
+    storeName: 'Steam',
+    url: `https://store.steampowered.com/app/${appId}`,
   };
 }   
 
-async function getDealDetails(dealID) {
-  const url = `https://www.cheapshark.com/api/1.0/deals?id=${dealID}`;
-  const data = await fetchJson(url);
-  if (!data) return null;
-  return {
-    storeID: data.storeID,
-    storeName: data.storeName,
-    salePrice: data.salePrice,
-    normalPrice: data.normalPrice,
-    savings: data.savings,
-    lastChange: data.lastChange ? new Date(data.lastChange * 1000).toISOString() : null,   
-    url: data.url,
-  };
-}
+const game = await getGamePrice(item.appId);
+if (!game) continue;
+
+const currentPrice = game.cheapest;
+const originalPrice = game.originalPrice;
+const discountPct = game.discountPct;
+const allTimeLow = Math.min(currentPrice, originalPrice * 0.5);
+
+const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
+const score = calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist);
+
+newSnapshots.push({
+  app_id: item.appId,
+  game_name: game.title,
+  store: game.storeName,
+  current_price: currentPrice,
+  original_price: originalPrice,
+  discount_pct: discountPct,
+  all_time_low: allTimeLow,
+  deal_score: Math.round(score * 100) / 100,
+  sale_end_date: null,
+  snapshot_time: now.toISOString(),
+});
+
+const lastNotif = cooldownMap.get(item.appId);
+const inCooldown = lastNotif && (now - lastNotif) < NOTIFICATION_COOLDOWN_HOURS * 3600000;
+
+if (score >= DEAL_SCORE_THRESHOLD && !inCooldown) {
+  alerts.push({
+    appId: item.appId,
+    title: game.title,
+    score,
+    currentPrice,
+    originalPrice,
+    discountPct,
+    daysOnWishlist,
+    url: game.url,
+  });
+}   
 
 async function getFreeGames() {
-  const url = `https://www.cheapshark.com/api/1.0/deals?onSale=1&lowerPrice=0&upperPrice=0&pageSize=50`;
+  // Steam's free game promotions endpoint
+  const url = `https://store.steampowered.com/api/featuredcategories?cc=us`;
   const data = await fetchJson(url);
-  return Array.isArray(data) ? data : [];
+  return [];
 }   
 
 // ─── Deal Score ────────────────────────────────────────────────
