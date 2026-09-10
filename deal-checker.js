@@ -421,14 +421,22 @@ async function main() {
   console.log('Deal Radar: Starting check...');
   const now = new Date();
 
-  // 1. Get wishlist
-  let wishlist;
-  try {
-    wishlist = await getWishlist();
-  } catch (e) {
-    console.error('Failed to fetch wishlist:', e.message);
-    process.exit(1);
-  }
+ // 1. Get wishlist
+let wishlist;
+try {
+  wishlist = await getWishlist();
+} catch (e) {
+  console.error('Failed to fetch wishlist:', e.message);
+  process.exit(1);
+}
+
+// 1b. Sync wishlist to Supabase
+try {
+  await syncWishlistToDatabase(wishlist);
+} catch (e) {
+  console.error('Failed to sync wishlist to Supabase:', e.message);
+  process.exit(1);
+}
 
   // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
