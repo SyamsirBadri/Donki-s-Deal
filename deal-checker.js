@@ -7,6 +7,7 @@ const {
   DISCORD_WEBHOOK_URL,
   SUPABASE_URL,
   SUPABASE_SERVICE_KEY,
+  ITAD_API_KEY,
 } = process.env;
 
 const DEAL_SCORE_THRESHOLD = 6;
