@@ -214,14 +214,14 @@ async function getSteamFreebies() {
   const url = 'https://store.steampowered.com/api/featuredcategories?cc=my&l=english';
   const data = await fetchJson(url);
   const items = data?.specials?.items || [];
-  return items
-    .filter((item) => item.discount_percent === 100)
-    .map((item) => ({
-      id: `steam:${item.id}`,
-      title: item.name,
-      storeName: 'Steam',
-      url: `https://store.steampowered.com/app/${item.id}`,
-    }));
+  const freebies = items.filter((item) => item.discount_percent === 100);
+  console.log(`Steam specials scanned: ${items.length}, at 100% off: ${freebies.length}`);
+  return freebies.map((item) => ({
+    id: `steam:${item.id}`,
+    title: item.name,
+    storeName: 'Steam',
+    url: `https://store.steampowered.com/app/${item.id}`,
+  }));
 }
 
 // Epic Games' official public freebies endpoint — no auth, no key,
@@ -232,26 +232,27 @@ async function getEpicFreebies() {
   const elements = data?.data?.Catalog?.searchStore?.elements || [];
   const now = Date.now();
 
-  return elements
-    .filter((el) => {
-      const blocks = el?.promotions?.promotionalOffers || [];
-      return blocks.some((block) =>
-        (block.promotionalOffers || []).some((offer) => {
-          if (offer.discountSetting?.discountPercentage !== 0) return false;
-          const starts = new Date(offer.startDate).getTime();
-          const ends = new Date(offer.endDate).getTime();
-          return now >= starts && now <= ends;
-        })
-      );
-    })
-    .map((el) => ({
-      id: `epic:${el.id}`,
-      title: el.title,
-      storeName: 'Epic Games',
-      url: el.productSlug
-        ? `https://store.epicgames.com/p/${el.productSlug}`
-        : 'https://store.epicgames.com/en-US/free-games',
-    }));
+  const freebies = elements.filter((el) => {
+    const blocks = el?.promotions?.promotionalOffers || [];
+    return blocks.some((block) =>
+      (block.promotionalOffers || []).some((offer) => {
+        if (offer.discountSetting?.discountPercentage !== 0) return false;
+        const starts = new Date(offer.startDate).getTime();
+        const ends = new Date(offer.endDate).getTime();
+        return now >= starts && now <= ends;
+      })
+    );
+  });
+  console.log(`Epic catalog scanned: ${elements.length}, currently free: ${freebies.length}`);
+
+  return freebies.map((el) => ({
+    id: `epic:${el.id}`,
+    title: el.title,
+    storeName: 'Epic Games',
+    url: el.productSlug
+      ? `https://store.epicgames.com/p/${el.productSlug}`
+      : 'https://store.epicgames.com/en-US/free-games',
+  }));
 }
 
 // Third-party keyshops (Fanatical, Humble Store, GOG, etc.) via
@@ -287,18 +288,19 @@ async function getThirdPartyFreebies() {
     return [];
   }
 
-  return list
-    .filter((deal) => (deal.deal?.cut ?? deal.cut) === 100)
-    .filter((deal) => {
-      const shop = (deal.deal?.shop?.name || deal.shop?.name || '').toLowerCase();
-      return shop && shop !== 'steam'; // Steam already covered by getSteamFreebies()
-    })
-    .map((deal) => ({
-      id: `itad:${deal.id || deal.game?.id}`,
-      title: deal.title || deal.game?.title,
-      storeName: deal.deal?.shop?.name || deal.shop?.name,
-      url: deal.deal?.url || deal.url,
-    }));
+  const freeDeals = list.filter((deal) => (deal.deal?.cut ?? deal.cut) === 100);
+  const thirdPartyFree = freeDeals.filter((deal) => {
+    const shop = (deal.deal?.shop?.name || deal.shop?.name || '').toLowerCase();
+    return shop && shop !== 'steam'; // Steam already covered by getSteamFreebies()
+  });
+  console.log(`ITAD deals scanned: ${list.length}, at 100% off: ${freeDeals.length}, non-Steam: ${thirdPartyFree.length}`);
+
+  return thirdPartyFree.map((deal) => ({
+    id: `itad:${deal.id || deal.game?.id}`,
+    title: deal.title || deal.game?.title,
+    storeName: deal.deal?.shop?.name || deal.shop?.name,
+    url: deal.deal?.url || deal.url,
+  }));
 }
 
 async function getFreeGames() {
