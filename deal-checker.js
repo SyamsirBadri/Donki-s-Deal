@@ -9,7 +9,7 @@ const {
   SUPABASE_SERVICE_KEY,
 } = process.env;
 
-const DEAL_SCORE_THRESHOLD = 0.5; // Set back to 8 once history builds up
+const DEAL_SCORE_THRESHOLD = 0.5;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
 
 // ─── HTTP Helper ───────────────────────────────────────────────
@@ -54,20 +54,19 @@ function postJson(url, body) {
   });
 }
 
-// ─── Supabase Helper (REST API) ────────────────────────────────
-async function supabaseQuery(table, { select = '*', where = '', method = 'GET', body = null } = {}) {
+// ─── Supabase Helper ───────────────────────────────────────────
+async function supabaseQuery(table, { select = '*', where = '' } = {}) {
   const url = `${SUPABASE_URL}/rest/v1/${table}${where ? `?${where}` : ''}`;
   return new Promise((resolve, reject) => {
-    const options = {
-      method,
+    const req = https.request(url, {
+      method: 'GET',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
         'apikey': SUPABASE_SERVICE_KEY,
         'Prefer': 'return=representation',
       },
-    };
-    const req = https.request(url, options, (res) => {
+    }, (res) => {
       let data = '';
       res.on('data', (c) => (data += c));
       res.on('end', () => {
@@ -76,7 +75,6 @@ async function supabaseQuery(table, { select = '*', where = '', method = 'GET', 
       });
     });
     req.on('error', reject);
-    if (body) req.write(JSON.stringify(body));
     req.end();
   });
 }
@@ -116,34 +114,34 @@ async function getWishlist() {
   })).filter((i) => i.appId);
 }
 
-// ─── Steam Store Price ─────────────────────────────────────────
+// ─── Steam Store Price (Malaysia) ──────────────────────────────
 async function getGamePrice(appId) {
-  const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=my`;   
+  const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=my`;
   const data = await fetchJson(url);
   const entry = data?.[appId];
   if (!entry || !entry.data || !entry.data.name) return null;
 
-  // price_overview only exists during a sale
-  // price field always exists for paid games
   const priceOverview = entry.data.price_overview;
   const basePrice = entry.data.price;
 
   let currentPrice, originalPrice, discountPct;
 
   if (priceOverview) {
-  currentPrice = parseFloat(priceOverview.final);       // "13.99" → 13.99
-  originalPrice = parseFloat(priceOverview.initial);    // "19.99" → 19.99
-  discountPct = priceOverview.discount_percent;         // 30 (already a number)
-} else if (basePrice) {
-  currentPrice = basePrice.final / 100;                 // 1999 → 19.99 (cents → dollars)
-  originalPrice = basePrice.initial / 100;
-  discountPct = basePrice.discount_percent || 0;
-}    else {
+    // Game is ON SALE — price_overview has string values in local currency
+    currentPrice = parseFloat(priceOverview.final);
+    originalPrice = parseFloat(priceOverview.initial);
+    discountPct = parseInt(priceOverview.discount_percent) || 0;
+  } else if (basePrice) {
+    // Game is NOT on sale — price has integer values in cents
+    currentPrice = basePrice.final / 100;
+    originalPrice = basePrice.initial / 100;
+    discountPct = basePrice.discount_percent || 0;
+  } else {
     // Free game or no price data
-    currentPrice = 0;
-    originalPrice = 0;
-    discountPct = 0;
+    return null;
   }
+
+  if (isNaN(currentPrice) || currentPrice <= 0) return null;
 
   return {
     title: entry.data.name,
@@ -154,30 +152,20 @@ async function getGamePrice(appId) {
     storeName: 'Steam',
     url: `https://store.steampowered.com/app/${appId}`,
   };
-}   
-
-// ─── Free Games (stub — expand later) ──────────────────────────
-async function getFreeGames() {
-  return [];
 }
 
-// ─── Deal Score ────────────────────────────────────────────────
-function calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist) {
-  if (!allTimeLow || allTimeLow <= 0) return 0;
-  if (!originalPrice || originalPrice <= 0) return 0;
-  if (!currentPrice || currentPrice <= 0) return 0;
-
-  const priceFactor = (1 - currentPrice / allTimeLow) * 7;
-  const discountFactor = (1 - currentPrice / originalPrice) * 2;
-  const patienceFactor = Math.min(daysOnWishlist / 365, 1) * 1;
-
-  return Math.max(0, Math.min(10, priceFactor + discountFactor + patienceFactor));
+// ─── Free Games (stub) ─────────────────────────────────────────
+async function getFreeGames() {
+  return [];
 }
 
 // ─── Discord Notification ──────────────────────────────────────
 async function sendDiscordAlert(content, embeds = []) {
   const result = await postJson(DISCORD_WEBHOOK_URL, { content, embeds });
   console.log(`Discord webhook response: ${result.status}`);
+  if (result.status !== 204) {
+    console.warn(`Discord webhook body: ${result.body?.slice(0, 200)}`);
+  }
 }
 
 // ─── Main ──────────────────────────────────────────────────────
@@ -218,16 +206,22 @@ async function main() {
       const currentPrice = game.cheapest;
       const originalPrice = game.originalPrice;
       const discountPct = game.discountPct;
-      const allTimeLow = Math.min(currentPrice, originalPrice * 0.5);
-
+      const allTimeLow = currentPrice;
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
-      const score = calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist);
-      console.log(`  ${game.title}: score=${score.toFixed(2)}, price=$${currentPrice}, orig=$${originalPrice}, discount=${discountPct}%`);   
+
+      // Inline score calculation (no separate function)
+      const priceFactor = (1 - currentPrice / allTimeLow) * 7;
+      const discountFactor = (1 - currentPrice / originalPrice) * 2;
+      const patienceFactor = Math.min(daysOnWishlist / 365, 1) * 1;
+      const score = Math.max(0, Math.min(10, priceFactor + discountFactor + patienceFactor));
+
+      // Log every game so we can see what's happening
+      console.log(`  ${game.title}: score=${score.toFixed(2)} [pf=${priceFactor.toFixed(2)}, df=${discountFactor.toFixed(2)}, pt=${patienceFactor.toFixed(2)}] price=${currentPrice} orig=${originalPrice} disc=${discountPct}%`);
 
       newSnapshots.push({
         app_id: item.appId,
         game_name: game.title,
-        store: game.storeName,
+        store: game.storeName.toLowerCase(),
         current_price: currentPrice,
         original_price: originalPrice,
         discount_pct: discountPct,
@@ -248,6 +242,7 @@ async function main() {
           currentPrice,
           originalPrice,
           discountPct,
+          storeName: game.storeName,
           daysOnWishlist,
           url: game.url,
         });
@@ -266,11 +261,10 @@ async function main() {
     const seenSet = new Set(Array.isArray(seenFree) ? seenFree.map((r) => r.app_id) : []);
 
     for (const fg of freeGames) {
-      const appId = fg.steamAppID;
+      const appId = fg.steamAppID || fg.app_id;
       if (!appId || seenSet.has(appId)) continue;
-
       await sendDiscordAlert(
-        `🆓 **FREE GAME: ${fg.title}**\nAvailable on ${fg.storeName}. [Claim Now](${fg.url})`
+        `FREE GAME: ${fg.title}\nAvailable on ${fg.storeName}. [Claim Now](${fg.url})`
       );
       await supabaseInsert('free_games_seen', [{ app_id: appId, first_seen: now.toISOString() }]);
     }
@@ -287,16 +281,17 @@ async function main() {
   // 7. Send deal alerts
   for (const alert of alerts) {
     const embed = {
-      title: `🔥 ${alert.title}`,
+      title: `DEAL: ${alert.title}`,
       description: [
-        `**Score:** ${alert.score.toFixed(1)}/10`,
-        `**Price:** $${alert.currentPrice.toFixed(2)} (was $${alert.originalPrice.toFixed(2)}, ${alert.discountPct}% off)`,
+        `**Score:** ${alert.score.toFixed(2)}/10`,
+        `**Price:** RM${alert.currentPrice.toFixed(2)} (was RM${alert.originalPrice.toFixed(2)}, ${alert.discountPct}% off)`,
+        `**Store:** ${alert.storeName}`,
         `**On wishlist:** ${alert.daysOnWishlist} days`,
       ].join('\n'),
       color: 0x00ff00,
       url: alert.url,
     };
-    await sendDiscordAlert(`Deal Score ${alert.score.toFixed(1)} — above threshold!`, [embed]);
+    await sendDiscordAlert(`Deal Score ${alert.score.toFixed(2)}`, [embed]);
     await supabaseInsert('last_notified', [{ app_id: alert.appId, last_notification: now.toISOString() }]);
   }
 
