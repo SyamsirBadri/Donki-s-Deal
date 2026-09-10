@@ -118,7 +118,7 @@ async function getWishlist() {
 
 // ─── Steam Store Price ─────────────────────────────────────────
 async function getGamePrice(appId) {
-  const url = `https://store.steampowered.com/api/appdetails?appids=${appId}`;
+  const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=my`;   
   const data = await fetchJson(url);
   const entry = data?.[appId];
   if (!entry || !entry.data || !entry.data.name) return null;
