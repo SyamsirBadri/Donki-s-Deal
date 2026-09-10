@@ -131,16 +131,14 @@ async function getGamePrice(appId) {
   let currentPrice, originalPrice, discountPct;
 
   if (priceOverview) {
-    // Game is on sale
-    currentPrice = priceOverview.final / 100;
-    originalPrice = priceOverview.initial / 100;
-    discountPct = priceOverview.discount_percent;
-  } else if (basePrice) {
-    // Game is NOT on sale — use base price
-    currentPrice = basePrice.final / 100;
-    originalPrice = basePrice.initial / 100;
-    discountPct = basePrice.discount_percent || 0;
-  } else {
+  currentPrice = parseFloat(priceOverview.final);       // "13.99" → 13.99
+  originalPrice = parseFloat(priceOverview.initial);    // "19.99" → 19.99
+  discountPct = priceOverview.discount_percent;         // 30 (already a number)
+} else if (basePrice) {
+  currentPrice = basePrice.final / 100;                 // 1999 → 19.99 (cents → dollars)
+  originalPrice = basePrice.initial / 100;
+  discountPct = basePrice.discount_percent || 0;
+}    else {
     // Free game or no price data
     currentPrice = 0;
     originalPrice = 0;
