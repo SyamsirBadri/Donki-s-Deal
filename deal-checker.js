@@ -9,7 +9,7 @@ const {
   SUPABASE_SERVICE_KEY,
 } = process.env;
 
-const DEAL_SCORE_THRESHOLD = 8;
+const DEAL_SCORE_THRESHOLD = 2;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
 
 // ─── HTTP Helper ───────────────────────────────────────────────
