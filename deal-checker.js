@@ -171,9 +171,88 @@ async function lookupItadGame(appId) {
   };
 }
 
-  console.log('ITAD lookup successful:');
-  console.log(`  ITAD ID: ${result.id}`);
-  console.log(`  ITAD title: ${result.title}`);
+async function matchWishlistGamesToItad(wishlist) {
+  if (wishlist.length === 0) {
+    console.log('Wishlist is empty — nothing to match.');
+    return;
+  }
+
+  console.log(`Matching ${wishlist.length} Steam games to ITAD...`);
+
+  const appIds = wishlist.map((item) => item.appId);
+
+  const url =
+    `https://api.isthereanydeal.com/lookup/id/shop/61/v1` +
+    `?key=${encodeURIComponent(ITAD_API_KEY)}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(
+      appIds.map((appId) => `app/${appId}`)
+    ),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `ITAD batch lookup failed (${response.status}): ${text}`
+    );
+  }
+
+  const results = await response.json();
+
+  const updates = [];
+  let matched = 0;
+  let failed = 0;
+
+  for (const item of wishlist) {
+    const key = `app/${item.appId}`;
+    const itadGameId = results?.[key];
+
+    if (itadGameId) {
+      updates.push({
+        app_id: item.appId,
+        itad_game_id: itadGameId,
+        itad_match_status: 'matched',
+        itad_match_source: 'steam_appid',
+        itad_matched_at: new Date().toISOString(),
+      });
+
+      matched++;
+
+      console.log(
+        `  Matched: ${item.appId} → ${itadGameId}`
+      );
+    } else {
+      updates.push({
+        app_id: item.appId,
+        itad_game_id: null,
+        itad_match_status: 'failed',
+        itad_match_source: 'steam_appid',
+      });
+
+      failed++;
+
+      console.log(
+        `  No ITAD match: ${item.appId}`
+      );
+    }
+  }
+
+  if (updates.length > 0) {
+    await supabaseUpsert(
+      'wishlist',
+      updates,
+      'app_id'
+    );
+  }
+
+  console.log(
+    `ITAD matching complete: ${matched} matched, ${failed} not found`
+  );
 }
 
 // ─── Wishlist Database Sync ───────────────────────────────────
@@ -460,6 +539,13 @@ try {
   await syncWishlistToDatabase(wishlist);
 } catch (e) {
   console.error('Failed to sync wishlist to Supabase:', e.message);
+  process.exit(1);
+}
+
+try {
+  await matchWishlistGamesToItad(wishlist);
+} catch (e) {
+  console.error('Failed to match wishlist to ITAD:', e.message);
   process.exit(1);
 }
 
