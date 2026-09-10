@@ -222,6 +222,7 @@ async function main() {
 
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
       const score = calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist);
+      console.log(`  ${game.title}: score=${score.toFixed(2)}, price=$${currentPrice}, orig=$${originalPrice}, discount=${discountPct}%`);   
 
       newSnapshots.push({
         app_id: item.appId,
