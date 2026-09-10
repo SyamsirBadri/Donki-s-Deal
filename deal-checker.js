@@ -161,7 +161,9 @@ async function getGamePrice(appId) {
   const originalPrice = priceOverview.initial / 100;
   const discountPct = priceOverview.discount_percent || 0;
 
-  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return null;
+  // Allow currentPrice === 0: a genuine 100%-off promo, not a broken response,
+  // as long as Steam actually returned a price_overview for it.
+  if (!Number.isFinite(currentPrice) || currentPrice < 0) return null;
   if (!Number.isFinite(originalPrice) || originalPrice <= 0) return null;
 
   return {
@@ -198,9 +200,120 @@ async function getHistoricalLows(appIds) {
   return map;
 }
 
-// ─── Free Games (stub) ─────────────────────────────────────────
+// ─── Free Games (100% off, any store, not limited to wishlist) ────
+// Each source resolves to a normalized list of:
+//   { id, title, storeName, url }
+// `id` is prefixed per-store (e.g. "steam:730") so free_games_seen can
+// dedupe across stores whose native IDs aren't comparable (Steam app IDs
+// are numeric, Epic's are opaque hex strings, ITAD's are slugs).
+
+// Steam-wide — scans everything Steam is currently featuring as a
+// special, not just your wishlist. Same host as getGamePrice(), so no
+// new blocking risk.
+async function getSteamFreebies() {
+  const url = 'https://store.steampowered.com/api/featuredcategories?cc=my&l=english';
+  const data = await fetchJson(url);
+  const items = data?.specials?.items || [];
+  return items
+    .filter((item) => item.discount_percent === 100)
+    .map((item) => ({
+      id: `steam:${item.id}`,
+      title: item.name,
+      storeName: 'Steam',
+      url: `https://store.steampowered.com/app/${item.id}`,
+    }));
+}
+
+// Epic Games' official public freebies endpoint — no auth, no key,
+// widely used and stable. Confirmed live and working as of this writing.
+async function getEpicFreebies() {
+  const url = 'https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=en-US&country=MY&allowCountries=MY';
+  const data = await fetchJson(url);
+  const elements = data?.data?.Catalog?.searchStore?.elements || [];
+  const now = Date.now();
+
+  return elements
+    .filter((el) => {
+      const blocks = el?.promotions?.promotionalOffers || [];
+      return blocks.some((block) =>
+        (block.promotionalOffers || []).some((offer) => {
+          if (offer.discountSetting?.discountPercentage !== 0) return false;
+          const starts = new Date(offer.startDate).getTime();
+          const ends = new Date(offer.endDate).getTime();
+          return now >= starts && now <= ends;
+        })
+      );
+    })
+    .map((el) => ({
+      id: `epic:${el.id}`,
+      title: el.title,
+      storeName: 'Epic Games',
+      url: el.productSlug
+        ? `https://store.epicgames.com/p/${el.productSlug}`
+        : 'https://store.epicgames.com/en-US/free-games',
+    }));
+}
+
+// Third-party keyshops (Fanatical, Humble Store, GOG, etc.) via
+// IsThereAnyDeal — a different service from gg.deals/CheapShark, so the
+// block you're hitting on those two shouldn't apply here.
+//
+// Needs a free API key from https://isthereanydeal.com/apps/my/ — set
+// ITAD_API_KEY in your environment. If unset, this source just skips
+// itself; everything else still runs.
+//
+// NOTE: I could not hit this endpoint live to confirm its current
+// response shape (verify against docs.isthereanydeal.com if this logs
+// a shape warning or comes back empty when you know a deal is live).
+async function getThirdPartyFreebies() {
+  const { ITAD_API_KEY } = process.env;
+  if (!ITAD_API_KEY) {
+    console.log('ITAD_API_KEY not set — skipping third-party (Fanatical/Humble/etc.) freebie check');
+    return [];
+  }
+
+  const url = `https://api.isthereanydeal.com/deals/v2?key=${ITAD_API_KEY}&country=MY&limit=200`;
+  let data;
+  try {
+    data = await fetchJson(url);
+  } catch (e) {
+    console.warn('ITAD request failed:', e.message);
+    return [];
+  }
+
+  const list = data?.list || data?.deals;
+  if (!Array.isArray(list)) {
+    console.warn('Unexpected ITAD response shape — top-level keys:', Object.keys(data || {}));
+    return [];
+  }
+
+  return list
+    .filter((deal) => (deal.deal?.cut ?? deal.cut) === 100)
+    .filter((deal) => {
+      const shop = (deal.deal?.shop?.name || deal.shop?.name || '').toLowerCase();
+      return shop && shop !== 'steam'; // Steam already covered by getSteamFreebies()
+    })
+    .map((deal) => ({
+      id: `itad:${deal.id || deal.game?.id}`,
+      title: deal.title || deal.game?.title,
+      storeName: deal.deal?.shop?.name || deal.shop?.name,
+      url: deal.deal?.url || deal.url,
+    }));
+}
+
 async function getFreeGames() {
-  return [];
+  const sources = [getSteamFreebies, getEpicFreebies, getThirdPartyFreebies];
+  const results = await Promise.allSettled(sources.map((fn) => fn()));
+
+  const freebies = [];
+  results.forEach((result, i) => {
+    if (result.status === 'fulfilled') {
+      freebies.push(...result.value);
+    } else {
+      console.warn(`Free games source #${i} (${sources[i].name}) failed: ${result.reason?.message}`);
+    }
+  });
+  return freebies;
 }
 
 // ─── Deal Scoring ──────────────────────────────────────────────
@@ -336,19 +449,19 @@ async function main() {
     await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
   }
 
-  // 6. Check free games
+  // 6. Check free games — Steam-wide, Epic, and third-party keyshops,
+  // independent of your wishlist entirely.
   try {
     const freeGames = await getFreeGames();
-    const seenFree = await supabaseQuery('free_games_seen', { select: 'app_id' });
-    const seenSet = new Set(Array.isArray(seenFree) ? seenFree.map((r) => r.app_id) : []);
+    const seenFree = await supabaseQuery('free_games_seen', { select: 'item_id' });
+    const seenSet = new Set(Array.isArray(seenFree) ? seenFree.map((r) => r.item_id) : []);
 
     for (const fg of freeGames) {
-      const appId = fg.steamAppID || fg.app_id;
-      if (!appId || seenSet.has(appId)) continue;
+      if (!fg.id || seenSet.has(fg.id)) continue;
       await sendDiscordAlert(
         `FREE GAME: ${fg.title}\nAvailable on ${fg.storeName}. [Claim Now](${fg.url})`
       );
-      await supabaseUpsert('free_games_seen', [{ app_id: appId, first_seen: now.toISOString() }], 'app_id');
+      await supabaseUpsert('free_games_seen', [{ item_id: fg.id, first_seen: now.toISOString() }], 'item_id');
     }
   } catch (e) {
     console.warn('Free games check failed:', e.message);
