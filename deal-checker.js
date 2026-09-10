@@ -104,14 +104,34 @@ async function supabaseInsert(table, rows) {
 async function getWishlist() {
   const url = `https://api.steampowered.com/IWishlistService/GetWishlist/v1?steamid=${STEAM_ID}&key=${STEAM_API_KEY}`;
   const data = await fetchJson(url);
-  // Response: { response: { wishlists: { "0": [ { appid, timestamp, priority }, ... ] } } }
-  const wishlists = data?.response?.wishlists || {};
-  const allItems = Object.values(wishlists).flat();
-  return allItems.map((item) => ({
-    appId: item.appid,
-    addedAt: new Date(item.timestamp * 1000).toISOString(),
-  }));
-}
+  
+  // DEBUG: log the raw response so we can see the actual structure
+  console.log('RAW WISHLIST RESPONSE:', JSON.stringify(data, null, 2).slice(0, 2000));
+  
+  // Try multiple possible response shapes
+  let items = [];
+  
+  if (data?.response?.wishlists) {
+    // Shape 1: { response: { wishlists: { "0": [...] } } }
+    items = Object.values(data.response.wishlists).flat();
+  } else if (data?.response?.items) {
+    // Shape 2: { response: { items: [...] } }
+    items = data.response.items;
+  } else if (Array.isArray(data?.response)) {
+    // Shape 3: { response: [...] }
+    items = data.response;
+  } else if (Array.isArray(data)) {
+    // Shape 4: direct array
+    items = data;
+  }
+  
+  console.log(`Parsed ${items.length} items from wishlist`);
+  
+  return items.map((item) => ({
+    appId: item.appid || item.app_id || item.id,
+    addedAt: new Date((item.timestamp || item.date_added || item.added_at) * 1000).toISOString(),
+  })).filter((i) => i.appId);
+}   
 
 // ─── CheapShark ────────────────────────────────────────────────
 async function getGamePrice(appId) {
