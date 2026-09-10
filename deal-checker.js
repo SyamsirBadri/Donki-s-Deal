@@ -123,21 +123,40 @@ async function getGamePrice(appId) {
   const entry = data?.[appId];
   if (!entry || !entry.data || !entry.data.name) return null;
 
+  // price_overview only exists during a sale
+  // price field always exists for paid games
   const priceOverview = entry.data.price_overview;
-  const currentPrice = priceOverview ? priceOverview.final / 100 : null;
-  const originalPrice = priceOverview ? priceOverview.initial / 100 : null;
-  const discountPct = priceOverview ? priceOverview.discount_percent : 0;
+  const basePrice = entry.data.price;
+
+  let currentPrice, originalPrice, discountPct;
+
+  if (priceOverview) {
+    // Game is on sale
+    currentPrice = priceOverview.final / 100;
+    originalPrice = priceOverview.initial / 100;
+    discountPct = priceOverview.discount_percent;
+  } else if (basePrice) {
+    // Game is NOT on sale — use base price
+    currentPrice = basePrice.final / 100;
+    originalPrice = basePrice.initial / 100;
+    discountPct = basePrice.discount_percent || 0;
+  } else {
+    // Free game or no price data
+    currentPrice = 0;
+    originalPrice = 0;
+    discountPct = 0;
+  }
 
   return {
     title: entry.data.name,
     cheapest: currentPrice,
-    originalPrice: originalPrice || currentPrice,
+    originalPrice: originalPrice,
     discountPct: discountPct,
     isOnSale: discountPct > 0,
     storeName: 'Steam',
     url: `https://store.steampowered.com/app/${appId}`,
   };
-}
+}   
 
 // ─── Free Games (stub — expand later) ──────────────────────────
 async function getFreeGames() {
