@@ -459,6 +459,8 @@ async function main() {
   console.log('Deal Radar: Starting check...');
   const now = new Date();
 
+await testItadLookup();
+  
  // 1. Get wishlist
 let wishlist;
 try {
