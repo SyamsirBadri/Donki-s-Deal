@@ -9,7 +9,7 @@ const {
   SUPABASE_SERVICE_KEY,
 } = process.env;
 
-const DEAL_SCORE_THRESHOLD = 0.5;
+const DEAL_SCORE_THRESHOLD = 4;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
 
 // ─── HTTP Helper ───────────────────────────────────────────────
@@ -127,17 +127,14 @@ async function getGamePrice(appId) {
   let currentPrice, originalPrice, discountPct;
 
   if (priceOverview) {
-    // Game is ON SALE — price_overview has string values in local currency
-    currentPrice = parseFloat(priceOverview.final);
-    originalPrice = parseFloat(priceOverview.initial);
-    discountPct = parseInt(priceOverview.discount_percent) || 0;
+    currentPrice = priceOverview.final / 100;
+    originalPrice = priceOverview.initial / 100;
+    discountPct = priceOverview.discount_percent || 0;
   } else if (basePrice) {
-    // Game is NOT on sale — price has integer values in cents
     currentPrice = basePrice.final / 100;
     originalPrice = basePrice.initial / 100;
     discountPct = basePrice.discount_percent || 0;
   } else {
-    // Free game or no price data
     return null;
   }
 
@@ -152,7 +149,7 @@ async function getGamePrice(appId) {
     storeName: 'Steam',
     url: `https://store.steampowered.com/app/${appId}`,
   };
-}
+}   
 
 // ─── Free Games (stub) ─────────────────────────────────────────
 async function getFreeGames() {
@@ -234,7 +231,7 @@ async function main() {
       const lastNotif = cooldownMap.get(item.appId);
       const inCooldown = lastNotif && (now - lastNotif) < NOTIFICATION_COOLDOWN_HOURS * 3600000;
 
-      if (score >= DEAL_SCORE_THRESHOLD && !inCooldown) {
+      if (score >= DEAL_SCORE_THRESHOLD && !inCooldown && discountPct > 0) {   
         alerts.push({
           appId: item.appId,
           title: game.title,
