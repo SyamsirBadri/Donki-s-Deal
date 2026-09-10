@@ -171,19 +171,6 @@ async function lookupItadGame(appId) {
   };
 }
 
-// ─── ITAD Lookup Test ─────────────────────────────────────────
-async function testItadLookup() {
-  const testAppId = 435150; // Divinity: Original Sin 2
-
-  console.log(`Testing ITAD lookup for Steam app ${testAppId}...`);
-
-  const result = await lookupItadGame(testAppId);
-
-  if (!result) {
-    console.log('ITAD lookup: no match found');
-    return;
-  }
-
   console.log('ITAD lookup successful:');
   console.log(`  ITAD ID: ${result.id}`);
   console.log(`  ITAD title: ${result.title}`);
@@ -458,8 +445,6 @@ async function main() {
   assertEnv();
   console.log('Deal Radar: Starting check...');
   const now = new Date();
-
-await testItadLookup();
   
  // 1. Get wishlist
 let wishlist;
