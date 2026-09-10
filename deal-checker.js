@@ -9,14 +9,19 @@ const {
   SUPABASE_SERVICE_KEY,
 } = process.env;
 
-const DEAL_SCORE_THRESHOLD = 1;
+const DEAL_SCORE_THRESHOLD = 1; // Set back to 8 once history builds up
 const NOTIFICATION_COOLDOWN_HOURS = 24;
 
 // ─── HTTP Helper ───────────────────────────────────────────────
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    mod.get(url, { headers: { 'User-Agent': 'DealRadar/1.0' } }, (res) => {
+    mod.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+      },
+    }, (res) => {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
@@ -53,7 +58,6 @@ function postJson(url, body) {
 async function supabaseQuery(table, { select = '*', where = '', method = 'GET', body = null } = {}) {
   const url = `${SUPABASE_URL}/rest/v1/${table}${where ? `?${where}` : ''}`;
   return new Promise((resolve, reject) => {
-    const mod = https;
     const options = {
       method,
       headers: {
@@ -63,7 +67,7 @@ async function supabaseQuery(table, { select = '*', where = '', method = 'GET', 
         'Prefer': 'return=representation',
       },
     };
-    const req = mod.request(url, options, (res) => {
+    const req = https.request(url, options, (res) => {
       let data = '';
       res.on('data', (c) => (data += c));
       res.on('end', () => {
@@ -104,17 +108,15 @@ async function supabaseInsert(table, rows) {
 async function getWishlist() {
   const url = `https://api.steampowered.com/IWishlistService/GetWishlist/v1?steamid=${STEAM_ID}&key=${STEAM_API_KEY}`;
   const data = await fetchJson(url);
-  
   const items = data?.response?.items || [];
   console.log(`Wishlist: ${items.length} games`);
-  
   return items.map((item) => ({
     appId: item.appid,
     addedAt: new Date(item.date_added * 1000).toISOString(),
   })).filter((i) => i.appId);
-}   
+}
 
-// ─── CheapShark ────────────────────────────────────────────────
+// ─── Steam Store Price ─────────────────────────────────────────
 async function getGamePrice(appId) {
   const url = `https://store.steampowered.com/api/appdetails?appids=${appId}`;
   const data = await fetchJson(url);
@@ -135,59 +137,18 @@ async function getGamePrice(appId) {
     storeName: 'Steam',
     url: `https://store.steampowered.com/app/${appId}`,
   };
-}   
+}
 
-const game = await getGamePrice(item.appId);
-if (!game) continue;
-
-const currentPrice = game.cheapest;
-const originalPrice = game.originalPrice;
-const discountPct = game.discountPct;
-const allTimeLow = Math.min(currentPrice, originalPrice * 0.5);
-
-const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
-const score = calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist);
-
-newSnapshots.push({
-  app_id: item.appId,
-  game_name: game.title,
-  store: game.storeName,
-  current_price: currentPrice,
-  original_price: originalPrice,
-  discount_pct: discountPct,
-  all_time_low: allTimeLow,
-  deal_score: Math.round(score * 100) / 100,
-  sale_end_date: null,
-  snapshot_time: now.toISOString(),
-});
-
-const lastNotif = cooldownMap.get(item.appId);
-const inCooldown = lastNotif && (now - lastNotif) < NOTIFICATION_COOLDOWN_HOURS * 3600000;
-
-if (score >= DEAL_SCORE_THRESHOLD && !inCooldown) {
-  alerts.push({
-    appId: item.appId,
-    title: game.title,
-    score,
-    currentPrice,
-    originalPrice,
-    discountPct,
-    daysOnWishlist,
-    url: game.url,
-  });
-}   
-
+// ─── Free Games (stub — expand later) ──────────────────────────
 async function getFreeGames() {
-  // Steam's free game promotions endpoint
-  const url = `https://store.steampowered.com/api/featuredcategories?cc=us`;
-  const data = await fetchJson(url);
   return [];
-}   
+}
 
 // ─── Deal Score ────────────────────────────────────────────────
 function calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist) {
   if (!allTimeLow || allTimeLow <= 0) return 0;
   if (!originalPrice || originalPrice <= 0) return 0;
+  if (!currentPrice || currentPrice <= 0) return 0;
 
   const priceFactor = (1 - currentPrice / allTimeLow) * 7;
   const discountFactor = (1 - currentPrice / originalPrice) * 2;
@@ -198,7 +159,8 @@ function calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishl
 
 // ─── Discord Notification ──────────────────────────────────────
 async function sendDiscordAlert(content, embeds = []) {
-  await postJson(DISCORD_WEBHOOK_URL, { content, embeds });
+  const result = await postJson(DISCORD_WEBHOOK_URL, { content, embeds });
+  console.log(`Discord webhook response: ${result.status}`);
 }
 
 // ─── Main ──────────────────────────────────────────────────────
@@ -210,27 +172,25 @@ async function main() {
   let wishlist;
   try {
     wishlist = await getWishlist();
-    console.log(`Wishlist: ${wishlist.length} games`);
   } catch (e) {
     console.error('Failed to fetch wishlist:', e.message);
     process.exit(1);
   }
 
-  // 2. Get purchased games (to skip)
+  // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
-  console.log('Supabase purchased response:', JSON.stringify(purchased).slice(0, 200));
-  const purchasedSet = new Set(Array.isArray(purchased) ? purchased.map((r) => r.app_id) : []);   
+  const purchasedSet = new Set(Array.isArray(purchased) ? purchased.map((r) => r.app_id) : []);
 
-  // 3. Get last notification times (for cooldown)
+  // 3. Get last notification times
   const lastNotified = await supabaseQuery('last_notified', { select: 'app_id,last_notification' });
   const cooldownMap = new Map(
-  Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
-  );   
+    Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
+  );
 
-  // 4. Check each game
   const newSnapshots = [];
   const alerts = [];
 
+  // 4. Check each game
   for (const item of wishlist) {
     if (purchasedSet.has(item.appId)) continue;
 
@@ -238,19 +198,10 @@ async function main() {
       const game = await getGamePrice(item.appId);
       if (!game) continue;
 
-      let deal = null;
-      if (game.cheapestDealID) {
-        deal = await getDealDetails(game.cheapestDealID);
-      }
-
-      const currentPrice = deal ? deal.salePrice : game.cheapest;
-      const originalPrice = deal ? deal.normalPrice : game.cheapest;
-      const discountPct = deal ? Math.round(deal.savings) : 0;
-
-      // Get all-time low from CheapShark (it's in the game search response sometimes,
-      // but for simplicity we use the current cheapest as a proxy for now.
-      // In a future iteration, you could store history and compute it.)
-      const allTimeLow = Math.min(currentPrice, originalPrice * 0.5); // TODO: compute from history after first 30 days
+      const currentPrice = game.cheapest;
+      const originalPrice = game.originalPrice;
+      const discountPct = game.discountPct;
+      const allTimeLow = Math.min(currentPrice, originalPrice * 0.5);
 
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
       const score = calculateDealScore(currentPrice, originalPrice, allTimeLow, daysOnWishlist);
@@ -258,17 +209,16 @@ async function main() {
       newSnapshots.push({
         app_id: item.appId,
         game_name: game.title,
-        store: deal ? deal.storeName.toLowerCase() : 'steam',
+        store: game.storeName,
         current_price: currentPrice,
         original_price: originalPrice,
         discount_pct: discountPct,
         all_time_low: allTimeLow,
         deal_score: Math.round(score * 100) / 100,
-        sale_end_date: null, // TODO: parse from deal if available
+        sale_end_date: null,
         snapshot_time: now.toISOString(),
       });
 
-      // Check if we should alert
       const lastNotif = cooldownMap.get(item.appId);
       const inCooldown = lastNotif && (now - lastNotif) < NOTIFICATION_COOLDOWN_HOURS * 3600000;
 
@@ -281,14 +231,13 @@ async function main() {
           originalPrice,
           discountPct,
           daysOnWishlist,
-          url: deal ? deal.url : `https://store.steampowered.com/app/${item.appId}`,
+          url: game.url,
         });
       }
     } catch (e) {
       console.warn(`Error checking app ${item.appId}: ${e.message}`);
     }
 
-    // Be polite: small delay between API calls
     await new Promise((r) => setTimeout(r, 1000));
   }
 
@@ -296,13 +245,12 @@ async function main() {
   try {
     const freeGames = await getFreeGames();
     const seenFree = await supabaseQuery('free_games_seen', { select: 'app_id' });
-    const seenSet = new Set(Array.isArray(seenFree) ? seenFree.map((r) => r.app_id) : []);   
+    const seenSet = new Set(Array.isArray(seenFree) ? seenFree.map((r) => r.app_id) : []);
 
     for (const fg of freeGames) {
       const appId = fg.steamAppID;
       if (!appId || seenSet.has(appId)) continue;
 
-      // New free game!
       await sendDiscordAlert(
         `🆓 **FREE GAME: ${fg.title}**\nAvailable on ${fg.storeName}. [Claim Now](${fg.url})`
       );
