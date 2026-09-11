@@ -362,10 +362,79 @@ async function getGamePrice(appId) {
   };
 }
 
-// ─── Historical Low Prices ─────────────────────────────────────
-// Pulls the lowest recorded current_price per app_id from price_snapshots,
-// scoped to the given app IDs, so "all-time low" is real history rather
-// than always equal to today's price.
+// ─── ITAD Historical Low Prices ────────────────────────────────
+async function getItadHistoricalLows(wishlistRows) {
+  const map = new Map();
+
+  const games = wishlistRows.filter(
+    (item) => item.itad_game_id
+  );
+
+  const itadToAppId = new Map(
+    games.map((game) => [game.itad_game_id, game.app_id])
+  );
+
+  if (games.length === 0) {
+    console.log('No ITAD-matched wishlist games to query for historical lows.');
+    return map;
+  }
+
+  const itadGameIds = games.map((item) => item.itad_game_id);
+
+  const url =
+    `https://api.isthereanydeal.com/games/historylow/v1` +
+    `?key=${encodeURIComponent(ITAD_API_KEY)}` +
+    `&country=MY`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(itadGameIds),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `ITAD historical-low lookup failed (${response.status}): ${text}`
+    );
+  }
+
+  const results = await response.json();
+
+  for (const result of Array.isArray(results) ? results : []) {
+    const low = result?.low;
+
+    if (
+      result?.id &&
+      low?.price?.amount !== undefined &&
+      low?.price?.currency
+    ) {
+      const appId = itadToAppId.get(result.id);
+
+      if (!appId) {
+        continue;
+      }
+
+      map.set(appId, {
+        price: Number(low.price.amount),
+        currency: low.price.currency,
+        store: low.shop?.name || null,
+        storeId: low.shop?.id || null,
+        timestamp: low.timestamp || null,
+      });
+    }
+  }
+
+  console.log(
+    `ITAD historical lows: ${map.size}/${games.length} games returned`
+  );
+
+  return map;
+}
+
+// ─── ITAD Current Prices ───────────────────────────────────────
 async function getItadCurrentPrices(wishlistRows) {
   const map = new Map();
 
