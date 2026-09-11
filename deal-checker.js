@@ -386,6 +386,8 @@ async function getItadHistoricalLows(wishlistRows) {
     `?key=${encodeURIComponent(ITAD_API_KEY)}` +
     `&country=MY`;
 
+  console.log('ITAD current-price URL:', url.replace(ITAD_API_KEY, 'REDACTED'));
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
