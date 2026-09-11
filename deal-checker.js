@@ -739,6 +739,12 @@ try {
     process.exit(1);
   }
 
+  const itadIdByAppId = new Map(
+  (Array.isArray(wishlistWithItad) ? wishlistWithItad : [])
+    .filter((row) => row.itad_game_id)
+    .map((row) => [row.app_id, row.itad_game_id])
+);
+
   const historicalLows = await getItadHistoricalLows(
   Array.isArray(wishlistWithItad) ? wishlistWithItad : []
 );
@@ -829,7 +835,7 @@ console.log(
 newSnapshots.push({
   app_id: item.appId,
   game_name: game.title,
-  itad_game_id: item.itad_game_id,
+  itad_game_id: itadIdByAppId.get(item.appId) ?? null,
   itad_shop_id: 61,
   price_source: 'steam',
   store: game.storeName.toLowerCase(),
@@ -859,7 +865,7 @@ for (const deal of itad?.trackedDeals || []) {
   newSnapshots.push({
     app_id: item.appId,
     game_name: game.title,
-    itad_game_id: item.itad_game_id,
+    itad_game_id: itadIdByAppId.get(item.appId) ?? null,
     itad_shop_id: shopId,
     price_source: 'itad',
     store: shopName.toLowerCase(),
