@@ -386,8 +386,6 @@ async function getItadHistoricalLows(wishlistRows) {
     `?key=${encodeURIComponent(ITAD_API_KEY)}` +
     `&country=MY`;
 
-  console.log('ITAD current-price URL:', url.replace(ITAD_API_KEY, 'REDACTED'));
-
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -452,11 +450,16 @@ async function getItadCurrentPrices(wishlistRows) {
   const itadGameIds = games.map((item) => item.itad_game_id);
 
   const url =
-    `https://api.isthereanydeal.com/games/prices/v3` +
-    `?key=${encodeURIComponent(ITAD_API_KEY)}` +
-    `&country=MY`;
+  `https://api.isthereanydeal.com/games/prices/v3` +
+  `?key=${encodeURIComponent(ITAD_API_KEY)}` +
+  `&country=MY`;
 
-    const response = await fetch(url, {
+console.log(
+  'ITAD current-price URL:',
+  url.replace(ITAD_API_KEY, 'REDACTED')
+);
+
+const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
