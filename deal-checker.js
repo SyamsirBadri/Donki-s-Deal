@@ -733,6 +733,25 @@ const currentItadPrices = await getItadCurrentPrices(
   Array.isArray(wishlistWithItad) ? wishlistWithItad : []
 );
 
+    // Diagnostic: show prices from our tracked stores
+  console.log('\nTracked-store price check:');
+
+  for (const item of wishlistWithItad) {
+    const itad = currentItadPrices.get(item.app_id);
+
+    if (!itad?.trackedDeals?.length) {
+      continue;
+    }
+
+    const prices = itad.trackedDeals.map((deal) => {
+      return `${deal.shop.name}: ${deal.price.amount} ${deal.price.currency}`;
+    });
+
+    console.log(`  ${item.app_id}: ${prices.join(' | ')}`);
+  }
+
+  console.log('End tracked-store price check.\n');
+
     // 1d. Load tracked stores
   let trackedStores;
   try {
