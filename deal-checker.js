@@ -842,7 +842,7 @@ newSnapshots.push({
   current_price: currentPrice,
   original_price: originalPrice,
   discount_pct: discountPct,
-  all_time_low: allTimeLow,
+  all_time_low: null,
   itad_history_low: itad?.historyLow?.all?.amount ?? null,
   itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
   currency: 'MYR',
