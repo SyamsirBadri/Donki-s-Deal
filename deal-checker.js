@@ -499,6 +499,8 @@ console.log('ITAD current-price stores:', storeCounts);
     games.map((game) => [game.itad_game_id, game.app_id])
   );
 
+    const trackedShopIds = new Set([61, 6, 35, 37]);
+
   for (const result of Array.isArray(results) ? results : []) {
     const appId = itadToAppId.get(result?.id);
 
@@ -506,7 +508,14 @@ console.log('ITAD current-price stores:', storeCounts);
       continue;
     }
 
-    map.set(appId, result);
+    const trackedDeals = (result?.deals || []).filter(
+      (deal) => trackedShopIds.has(deal?.shop?.id)
+    );
+
+    map.set(appId, {
+      ...result,
+      trackedDeals,
+    });
   }
 
   console.log(
@@ -515,7 +524,6 @@ console.log('ITAD current-price stores:', storeCounts);
 
   return map;
 }
-
 // ─── Free Games (100% off, any store, not limited to wishlist) ────
 // Each source resolves to a normalized list of:
 //   { id, title, storeName, url }
