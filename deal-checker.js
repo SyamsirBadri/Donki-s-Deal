@@ -477,9 +477,18 @@ const response = await fetch(url, {
     const results = await response.json();
 
   console.log(
-    'ITAD current-price sample:',
-    JSON.stringify(results?.[0], null, 2)
-  );
+  'ITAD current-price sample:',
+  JSON.stringify(results?.[0], null, 2)
+);
+
+console.log(
+  'ITAD current-price currencies:',
+  [...new Set(
+    results.flatMap(result =>
+      (result?.deals || []).map(deal => deal?.price?.currency)
+    )
+  )]
+);
 
   const itadToAppId = new Map(
     games.map((game) => [game.itad_game_id, game.app_id])
