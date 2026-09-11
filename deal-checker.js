@@ -468,7 +468,12 @@ async function getItadCurrentPrices(wishlistRows) {
     );
   }
 
-  const results = await response.json();
+    const results = await response.json();
+
+  console.log(
+    'ITAD current-price sample:',
+    JSON.stringify(results?.[0], null, 2)
+  );
 
   const itadToAppId = new Map(
     games.map((game) => [game.itad_game_id, game.app_id])
