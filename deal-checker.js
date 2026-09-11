@@ -468,11 +468,14 @@ const response = await fetch(url, {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(
-      `ITAD current-price lookup failed (${response.status}): ${text}`
-    );
-  }
+  const text = await response.text();
+
+  console.warn(
+    `ITAD current-price lookup failed (${response.status}): ${text}`
+  );
+
+  return new Map();
+}
 
     const results = await response.json();
 
