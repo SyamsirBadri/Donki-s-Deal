@@ -255,7 +255,7 @@ async function matchWishlistGamesToItad(wishlist) {
     } else {
       updates.push({
         app_id: item.appId,
-        itad_game_id: null,
+        itad_game_id: item.itadGameId,
         itad_match_status: 'failed',
         itad_match_source: 'steam_appid',
       });
