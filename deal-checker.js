@@ -815,31 +815,39 @@ const currentItadPrices = await getItadCurrentPrices(
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
 
       const { score, priceFactor, discountFactor, patienceFactor } = calculateDealScore({
-        currentPrice, originalPrice, allTimeLow, daysOnWishlist,
-      });
+  currentPrice, originalPrice, allTimeLow, daysOnWishlist,
+});
 
-      console.log(
-        `  ${game.title}: score=${score.toFixed(2)} ` +
-        `[pf=${priceFactor.toFixed(2)}, df=${discountFactor.toFixed(2)}, pt=${patienceFactor.toFixed(2)}] ` +
-        `price=${currentPrice} orig=${originalPrice} atl=${allTimeLow} disc=${discountPct}%`
-      );
+const itad = currentItadPrices.get(item.appId);
 
-      newSnapshots.push({
+console.log(
+  `  ${game.title}: score=${score.toFixed(2)} ` +
+  `[pf=${priceFactor.toFixed(2)}, df=${discountFactor.toFixed(2)}, pt=${patienceFactor.toFixed(2)}] ` +
+  `price=${currentPrice} orig=${originalPrice} atl=${allTimeLow} disc=${discountPct}%`
+);
+
+newSnapshots.push({
   app_id: item.appId,
   game_name: game.title,
+  itad_game_id: item.itad_game_id,
+  itad_shop_id: 61,
+  price_source: 'steam',
   store: game.storeName.toLowerCase(),
   current_price: currentPrice,
   original_price: originalPrice,
   discount_pct: discountPct,
   all_time_low: allTimeLow,
+  itad_history_low: itad?.historyLow?.all?.amount ?? null,
+  itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
+  currency: 'MYR',
+  store_url: null,
   deal_score: Math.round(score * 100) / 100,
   sale_end_date: null,
+  is_best_current_price: false,
   snapshot_time: now.toISOString(),
 });
 
 // Save tracked-store prices from ITAD
-const itad = currentItadPrices.get(item.appId);
-
 for (const deal of itad?.trackedDeals || []) {
   const shopId = deal?.shop?.id;
   const shopName = deal?.shop?.name;
