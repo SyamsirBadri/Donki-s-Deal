@@ -724,6 +724,27 @@ try {
 const currentItadPrices = await getItadCurrentPrices(
   Array.isArray(wishlistWithItad) ? wishlistWithItad : []
 );
+
+    // 1d. Load tracked stores
+  let trackedStores;
+  try {
+    trackedStores = await supabaseQuery('tracked_stores', {
+      select: 'store_code,store_name,itad_shop_id,enabled,include_in_comparison,priority',
+    });
+
+    console.log(
+      'Tracked stores:',
+      Array.isArray(trackedStores)
+        ? trackedStores
+            .filter((store) => store.enabled)
+            .map((store) => `${store.store_name} (${store.itad_shop_id ?? 'no ITAD ID'})`)
+            .join(', ')
+        : 'none'
+    );
+  } catch (e) {
+    console.error('Failed to load tracked stores:', e.message);
+    process.exit(1);
+  }
   
   // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
