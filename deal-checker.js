@@ -481,14 +481,16 @@ const response = await fetch(url, {
   JSON.stringify(results?.[0], null, 2)
 );
 
-console.log(
-  'ITAD current-price currencies:',
-  [...new Set(
-    results.flatMap(result =>
-      (result?.deals || []).map(deal => deal?.price?.currency)
-    )
-  )]
-);
+const storeCounts = {};
+
+for (const result of results) {
+  for (const deal of result?.deals || []) {
+    const key = `${deal?.shop?.id}:${deal?.shop?.name}`;
+    storeCounts[key] = (storeCounts[key] || 0) + 1;
+  }
+}
+
+console.log('ITAD current-price stores:', storeCounts);
 
   const itadToAppId = new Map(
     games.map((game) => [game.itad_game_id, game.app_id])
