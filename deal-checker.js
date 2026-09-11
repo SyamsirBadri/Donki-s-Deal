@@ -855,6 +855,9 @@ newSnapshots.push({
 
 // Save tracked-store prices from ITAD
 for (const deal of itad?.trackedDeals || []) {
+  if (deal?.shop?.id === 61) {
+  continue;
+}
   const shopId = deal?.shop?.id;
   const shopName = deal?.shop?.name;
 
