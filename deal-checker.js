@@ -373,6 +373,10 @@ async function getItadHistoricalLows(wishlistRows) {
     (item) => item.itad_game_id
   );
 
+  const itadToAppId = new Map(
+  games.map((game) => [game.itad_game_id, game.app_id])
+);
+
   if (games.length === 0) {
     console.log('No ITAD-matched wishlist games to query for historical lows.');
     return map;
@@ -410,7 +414,13 @@ async function getItadHistoricalLows(wishlistRows) {
       low?.price?.amount !== undefined &&
       low?.price?.currency
     ) {
-      map.set(result.id, {
+      const appId = itadToAppId.get(result.id);
+
+if (!appId) {
+  continue;
+}
+
+map.set(appId, {
         price: Number(low.price.amount),
         currency: low.price.currency,
         store: low.shop?.name || null,
@@ -628,9 +638,9 @@ try {
     process.exit(1);
   }
 
-  const itadHistoryLows = await getItadHistoricalLows(
-    Array.isArray(wishlistWithItad) ? wishlistWithItad : []
-  );
+  const historicalLows = await getItadHistoricalLows(
+  Array.isArray(wishlistWithItad) ? wishlistWithItad : []
+);
   
   // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
@@ -641,15 +651,6 @@ try {
   const lastNotified = await supabaseQuery('last_notified', { select: 'app_id,last_notification' });
   const cooldownMap = new Map(
     Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
-  );
-
-    // 4. ITAD historical lows were loaded above in one bulk request.
-  const historicalLows = new Map();
-  const wishlistItadMap = new Map(
-    (Array.isArray(wishlistWithItad) ? wishlistWithItad : []).map((row) => [
-      row.app_id,
-      row.itad_game_id,
-    ])
   );
 
   const newSnapshots = [];
@@ -665,7 +666,7 @@ try {
       const originalPrice = game.originalPrice;
       const discountPct = game.discountPct;
       const priorLow = historicalLows.get(item.appId);
-      const allTimeLow = priorLow !== undefined ? Math.min(currentPrice, priorLow) : currentPrice;
+      const allTimeLow = priorLow ? Math.min(currentPrice, priorLow.price) : currentPrice;
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
 
       const { score, priceFactor, discountFactor, patienceFactor } = calculateDealScore({
