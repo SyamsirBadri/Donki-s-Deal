@@ -851,7 +851,7 @@ newSnapshots.push({
   itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
   currency: 'MYR',
   store_url: null,
-  deal_score: Math.round(score * 100) / 100,
+  deal_score: null,
   sale_end_date: null,
   is_best_current_price: false,
   snapshot_time: now.toISOString(),
