@@ -825,17 +825,50 @@ const currentItadPrices = await getItadCurrentPrices(
       );
 
       newSnapshots.push({
-        app_id: item.appId,
-        game_name: game.title,
-        store: game.storeName.toLowerCase(),
-        current_price: currentPrice,
-        original_price: originalPrice,
-        discount_pct: discountPct,
-        all_time_low: allTimeLow,
-        deal_score: Math.round(score * 100) / 100,
-        sale_end_date: null,
-        snapshot_time: now.toISOString(),
-      });
+  app_id: item.appId,
+  game_name: game.title,
+  store: game.storeName.toLowerCase(),
+  current_price: currentPrice,
+  original_price: originalPrice,
+  discount_pct: discountPct,
+  all_time_low: allTimeLow,
+  deal_score: Math.round(score * 100) / 100,
+  sale_end_date: null,
+  snapshot_time: now.toISOString(),
+});
+
+// Save tracked-store prices from ITAD
+const itad = currentItadPrices.get(item.appId);
+
+for (const deal of itad?.trackedDeals || []) {
+  const shopId = deal?.shop?.id;
+  const shopName = deal?.shop?.name;
+
+  if (!shopId || !shopName || !deal?.price?.amount) {
+    continue;
+  }
+
+  newSnapshots.push({
+    app_id: item.appId,
+    game_name: game.title,
+    itad_game_id: item.itad_game_id,
+    itad_shop_id: shopId,
+    price_source: 'itad',
+    store: shopName.toLowerCase(),
+    current_price: deal.price.amount,
+    original_price: deal.regular?.amount ?? deal.price.amount,
+    discount_pct: deal.cut ?? 0,
+    all_time_low: null,
+    itad_history_low: itad?.historyLow?.all?.amount ?? null,
+    itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
+    currency: deal.price.currency ?? null,
+    store_url: deal.url ?? null,
+    deal_score: null,
+    sale_end_date: deal.expiry ?? null,
+    is_best_current_price: false,
+    snapshot_time: now.toISOString(),
+  });
+}
 
       const lastNotif = cooldownMap.get(item.appId);
       const inCooldown = lastNotif && (now - lastNotif) < NOTIFICATION_COOLDOWN_HOURS * 3600000;
