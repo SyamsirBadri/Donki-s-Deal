@@ -822,24 +822,20 @@ const currentItadPrices = await getItadCurrentPrices(
       if (!game) continue;
 
       const currentPrice = game.cheapest;
-      const originalPrice = game.originalPrice;
-      const discountPct = game.discountPct;
-      const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
-
-      const { score, priceFactor, discountFactor, patienceFactor } = calculateDealScore({
-        currentPrice,
-        originalPrice,
-        daysOnWishlist,
-});
+const originalPrice = game.originalPrice;
+const discountPct = game.discountPct;
+const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
 
 const itad = currentItadPrices.get(item.appId);
 
 console.log(
-  `  ${game.title}: score=${score.toFixed(2)} ` +
-  `[pf=${priceFactor.toFixed(2)}, df=${discountFactor.toFixed(2)}, pt=${patienceFactor.toFixed(2)}] ` +
-  `price=${currentPrice} orig=${originalPrice} atl=${allTimeLow} disc=${discountPct}%`
+  `  ${game.title}: ` +
+  `price=RM${currentPrice.toFixed(2)} ` +
+  `orig=RM${originalPrice.toFixed(2)} ` +
+  `disc=${discountPct}% ` +
+  `wishlist=${daysOnWishlist}d`
 );
-
+      
 newSnapshots.push({
   app_id: item.appId,
   game_name: game.title,
@@ -895,22 +891,8 @@ for (const deal of itad?.trackedDeals || []) {
   });
 }
 
-      const lastNotif = cooldownMap.get(item.appId);
-      const inCooldown = lastNotif && (now - lastNotif) < NOTIFICATION_COOLDOWN_HOURS * 3600000;
-
-      if (score >= DEAL_SCORE_THRESHOLD && !inCooldown && discountPct > 0) {
-        alerts.push({
-          appId: item.appId,
-          title: game.title,
-          score,
-          currentPrice,
-          originalPrice,
-          discountPct,
-          storeName: game.storeName,
-          daysOnWishlist,
-          url: game.url,
-        });
-      }
+      // Deal alerts are temporarily disabled while we build the new Buy Score.
+      // Price snapshots continue to be collected normally.
     } catch (e) {
       console.warn(`Error checking app ${item.appId}: ${e.message}`);
     }
