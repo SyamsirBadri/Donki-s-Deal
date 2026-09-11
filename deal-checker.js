@@ -366,22 +366,64 @@ async function getGamePrice(appId) {
 // Pulls the lowest recorded current_price per app_id from price_snapshots,
 // scoped to the given app IDs, so "all-time low" is real history rather
 // than always equal to today's price.
-async function getHistoricalLows(appIds) {
+async function getItadHistoricalLows(wishlistRows) {
   const map = new Map();
-  if (appIds.length === 0) return map;
 
-  const idsFilter = `app_id=in.(${appIds.join(',')})`;
-  const rows = await supabaseQuery('price_snapshots', {
-    select: 'app_id,current_price',
-    where: idsFilter,
+  const games = wishlistRows.filter(
+    (item) => item.itad_game_id
+  );
+
+  if (games.length === 0) {
+    console.log('No ITAD-matched wishlist games to query for historical lows.');
+    return map;
+  }
+
+  const itadGameIds = games.map((item) => item.itad_game_id);
+
+  const url =
+    `https://api.isthereanydeal.com/games/historylow/v1` +
+    `?key=${encodeURIComponent(ITAD_API_KEY)}` +
+    `&country=MY`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(itadGameIds),
   });
 
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const prev = map.get(row.app_id);
-    if (prev === undefined || row.current_price < prev) {
-      map.set(row.app_id, row.current_price);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `ITAD historical-low lookup failed (${response.status}): ${text}`
+    );
+  }
+
+  const results = await response.json();
+
+  for (const result of Array.isArray(results) ? results : []) {
+    const low = result?.low;
+
+    if (
+      result?.id &&
+      low?.price?.amount !== undefined &&
+      low?.price?.currency
+    ) {
+      map.set(result.id, {
+        price: Number(low.price.amount),
+        currency: low.price.currency,
+        store: low.shop?.name || null,
+        storeId: low.shop?.id || null,
+        timestamp: low.timestamp || null,
+      });
     }
   }
+
+  console.log(
+    `ITAD historical lows: ${map.size}/${games.length} games returned`
+  );
+
   return map;
 }
 
@@ -575,6 +617,21 @@ try {
   process.exit(1);
 }
 
+    // 1c. Load ITAD IDs from the wishlist
+  let wishlistWithItad;
+  try {
+    wishlistWithItad = await supabaseQuery('wishlist', {
+      select: 'app_id,itad_game_id,itad_match_status',
+    });
+  } catch (e) {
+    console.error('Failed to load ITAD wishlist mappings:', e.message);
+    process.exit(1);
+  }
+
+  const itadHistoryLows = await getItadHistoricalLows(
+    Array.isArray(wishlistWithItad) ? wishlistWithItad : []
+  );
+  
   // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
   const purchasedSet = new Set(Array.isArray(purchased) ? purchased.map((r) => r.app_id) : []);
@@ -586,8 +643,14 @@ try {
     Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
   );
 
-  // 4. Get historical lows in one bulk query instead of per-game
-  const historicalLows = await getHistoricalLows(toCheck.map((i) => i.appId));
+    // 4. ITAD historical lows were loaded above in one bulk request.
+  const historicalLows = new Map();
+  const wishlistItadMap = new Map(
+    (Array.isArray(wishlistWithItad) ? wishlistWithItad : []).map((row) => [
+      row.app_id,
+      row.itad_game_id,
+    ])
+  );
 
   const newSnapshots = [];
   const alerts = [];
