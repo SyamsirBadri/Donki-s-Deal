@@ -451,7 +451,8 @@ async function getItadCurrentPrices(wishlistRows) {
 
   const url =
     `https://api.isthereanydeal.com/games/prices/v3` +
-    `?key=${encodeURIComponent(ITAD_API_KEY)}`;
+    `?key=${encodeURIComponent(ITAD_API_KEY)}` +
+    `&country=MY`;
 
     const response = await fetch(url, {
     method: 'POST',
