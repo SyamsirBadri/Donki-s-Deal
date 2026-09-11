@@ -508,9 +508,23 @@ console.log('ITAD current-price stores:', storeCounts);
       continue;
     }
 
-    const trackedDeals = (result?.deals || []).filter(
-      (deal) => trackedShopIds.has(deal?.shop?.id)
-    );
+  const trackedDealsByShop = new Map();
+
+for (const deal of result?.deals || []) {
+  const shopId = deal?.shop?.id;
+
+  if (!trackedShopIds.has(shopId)) {
+    continue;
+  }
+
+  const existing = trackedDealsByShop.get(shopId);
+
+  if (!existing || deal?.price?.amount < existing?.price?.amount) {
+    trackedDealsByShop.set(shopId, deal);
+  }
+}
+
+const trackedDeals = Array.from(trackedDealsByShop.values());
 
     map.set(appId, {
       ...result,
