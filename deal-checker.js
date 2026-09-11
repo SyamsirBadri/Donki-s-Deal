@@ -177,9 +177,35 @@ async function matchWishlistGamesToItad(wishlist) {
     return;
   }
 
-  console.log(`Matching ${wishlist.length} Steam games to ITAD...`);
+  // Only send games to ITAD that are not already matched.
+  const existing = await supabaseQuery('wishlist', {
+    select: 'app_id,itad_game_id,itad_match_status',
+    where: `app_id=in.(${wishlist.map((item) => item.appId).join(',')})`,
+  });
 
-  const appIds = wishlist.map((item) => item.appId);
+  const existingMap = new Map(
+    (Array.isArray(existing) ? existing : []).map((row) => [
+      row.app_id,
+      row,
+    ])
+  );
+
+  const gamesToMatch = wishlist.filter((item) => {
+    const row = existingMap.get(item.appId);
+    return !row || row.itad_match_status !== 'matched';
+  });
+
+  if (gamesToMatch.length === 0) {
+    console.log('All wishlist games are already matched to ITAD — nothing to match.');
+    return;
+  }
+
+  console.log(
+    `Matching ${gamesToMatch.length} wishlist games to ITAD ` +
+    `(${wishlist.length - gamesToMatch.length} already matched)...`
+  );
+
+  const appIds = gamesToMatch.map((item) => item.appId);
 
   const url =
     `https://api.isthereanydeal.com/lookup/id/shop/61/v1` +
@@ -208,7 +234,7 @@ async function matchWishlistGamesToItad(wishlist) {
   let matched = 0;
   let failed = 0;
 
-  for (const item of wishlist) {
+  for (const item of gamesToMatch) {
     const key = `app/${item.appId}`;
     const itadGameId = results?.[key];
 
