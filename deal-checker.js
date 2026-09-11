@@ -669,24 +669,32 @@ async function getFreeGames() {
 // can never be below allTimeLow — a naive (1 - currentPrice/allTimeLow)
 // ratio is therefore always <= 0 and can never reward a real discount,
 // which is why every score floored at 0 before this fix.
-function calculateDealScore({ currentPrice, originalPrice, allTimeLow, daysOnWishlist }) {
-  const priceRange = originalPrice - allTimeLow;
-  let priceFactor;
-  if (priceRange > 0) {
-    const positionInRange = (currentPrice - allTimeLow) / priceRange; // 0 = at ATL, 1 = at full price
-    priceFactor = Math.max(0, Math.min(1, 1 - positionInRange)) * 7;
-  } else {
-    // Degenerate case: original price isn't above the all-time low (e.g. a
-    // base-price cut). Full credit if today's price is at/under that low.
-    priceFactor = currentPrice <= allTimeLow ? 7 : 0;
-  }
+function calculateDealScore({ currentPrice, originalPrice, daysOnWishlist }) {
+  const discountFactor =
+    originalPrice > 0
+      ? Math.max(0, Math.min(1, 1 - currentPrice / originalPrice)) * 2
+      : 0;
 
-  const discountFactor = originalPrice > 0 ? (1 - currentPrice / originalPrice) * 2 : 0;
-  const patienceFactor = Math.min(daysOnWishlist / 365, 1) * 1;
+  const patienceFactor =
+    Math.min(daysOnWishlist / 365, 1) * 1;
 
-  const rawScore = priceFactor + discountFactor + patienceFactor;
-  const score = Math.max(0, Math.min(10, rawScore)); // safety net; shouldn't clip in normal cases now
-  return { score, priceFactor, discountFactor, patienceFactor };
+  // Temporary currency-safe score.
+  // We will replace this entire scoring system with Buy Score later.
+  const priceFactor = 0;
+
+  const rawScore =
+    priceFactor +
+    discountFactor +
+    patienceFactor;
+
+  const score = Math.max(0, Math.min(10, rawScore));
+
+  return {
+    score,
+    priceFactor,
+    discountFactor,
+    patienceFactor,
+  };
 }
 
 // ─── Discord Notification ──────────────────────────────────────
@@ -816,12 +824,12 @@ const currentItadPrices = await getItadCurrentPrices(
       const currentPrice = game.cheapest;
       const originalPrice = game.originalPrice;
       const discountPct = game.discountPct;
-      const priorLow = historicalLows.get(item.appId);
-      const allTimeLow = priorLow ? Math.min(currentPrice, priorLow.price) : currentPrice;
       const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
 
       const { score, priceFactor, discountFactor, patienceFactor } = calculateDealScore({
-  currentPrice, originalPrice, allTimeLow, daysOnWishlist,
+        currentPrice,
+        originalPrice,
+        daysOnWishlist,
 });
 
 const itad = currentItadPrices.get(item.appId);
