@@ -1262,6 +1262,21 @@ for (const alert of alerts) {
       [embed]
     );
 
+        // Record the successful notification in permanent history.
+    await supabaseInsert('notification_log', [{
+      app_id: alert.appId,
+      game_name: alert.title,
+      notification_type: 'deal',
+      buy_score: alert.score,
+      store: alert.storeName,
+      price: alert.currentPrice,
+      currency: 'MYR',
+      historical_low: null,
+      sent_at: now.toISOString(),
+    }]);
+
+    // Update cooldown state only after Discord delivery and
+    // notification history have both been recorded.
     await supabaseUpsert(
       'last_notified',
       [{
