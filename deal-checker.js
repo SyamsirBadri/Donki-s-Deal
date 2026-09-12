@@ -674,7 +674,9 @@ function calculateBuyScore({
   daysOnWishlist,
   discountPct,
   itadCurrentPrice,
+  itadCurrentCurrency,
   itadHistoricalLow,
+  itadHistoricalLowCurrency,
   itadDealsForScoring,
 }) {
   // 1. Wishlist desire
@@ -716,13 +718,16 @@ function calculateBuyScore({
   let historicalLowScore = 0;
 
   const currentItadPrice = Number(itadCurrentPrice);
-const historicalLow = Number(itadHistoricalLow);
+  const historicalLow = Number(itadHistoricalLow);
 
-if (
-  Number.isFinite(currentItadPrice) &&
-  Number.isFinite(historicalLow) &&
-  historicalLow > 0
-) {
+  if (
+    Number.isFinite(currentItadPrice) &&
+    Number.isFinite(historicalLow) &&
+    historicalLow > 0 &&
+    itadCurrentCurrency &&
+    itadHistoricalLowCurrency &&
+    itadCurrentCurrency === itadHistoricalLowCurrency
+  ) {
   const distancePct =
     ((currentItadPrice - historicalLow) / historicalLow) * 100;
 
@@ -945,7 +950,9 @@ for (const item of toCheck) {
   daysOnWishlist,
   discountPct,
   itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
+  itadCurrentCurrency: bestItadDeal?.price?.currency ?? null,
   itadHistoricalLow: itad?.historyLow?.all?.amount ?? null,
+  itadHistoricalLowCurrency: itad?.historyLow?.all?.currency ?? null,
   itadDealsForScoring: itadDeals,
 });
     
