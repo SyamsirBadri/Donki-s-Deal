@@ -313,7 +313,11 @@ async function matchWishlistGamesToItad(wishlist) {
 }
 
 // ─── Wishlist Database Sync ───────────────────────────────────
-async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
+// `namesByAppId` maps app_id → real title from Steam. Populated
+// from both priced games and skip-reason games (coming soon,
+// free-to-play), so wishlist rows get canonical Steam names even
+// before a game has a price.
+async function syncWishlistToDatabase(wishlist, namesByAppId) {
   if (wishlist.length === 0) {
     console.log('Wishlist is empty — nothing to sync.');
     return;
@@ -333,14 +337,13 @@ async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
   }));
   await supabaseUpsert('wishlist', baseRows, 'app_id');
 
-  // Upsert 2 — only rows where Steam returned a real title.
-  // Keeps the existing game_name untouched when Steam fails for a
-  // game, so a partial Steam outage can't blank out the table.
+  // Upsert 2 — only rows where Steam returned a title. Uniform
+  // keys here too, so it's a separate call from the base rows.
   const nameRows = wishlist
     .map((item) => {
-      const game = gameDataByAppId.get(item.appId);
-      if (!game?.title) return null;
-      return { app_id: item.appId, game_name: game.title };
+      const title = namesByAppId.get(item.appId);
+      if (!title) return null;
+      return { app_id: item.appId, game_name: title };
     })
     .filter(Boolean);
 
@@ -701,14 +704,20 @@ async function main() {
   // calls have no such restriction, so we go one at a time with a short
   // delay — well inside Steam's 200-req/5-min limit.
   const gameDataByAppId = new Map();
+  // Steam returns a title even for games with no price (coming soon,
+  // free-to-play). Keep those titles so the wishlist table can be
+  // updated with real names instead of relying on manual backfill.
+  const namesByAppId = new Map();
 
   for (const item of wishlist) {
     try {
       const game = await getGamePrice(item.appId);
       if (game?._skipReason) {
         console.log(`  Skipping ${item.appId} (${game._skipReason}): ${game.title || 'unknown'}`);
+        if (game.title) namesByAppId.set(item.appId, game.title);
       } else if (game) {
         gameDataByAppId.set(item.appId, game);
+        if (game.title) namesByAppId.set(item.appId, game.title);
       } else {
         console.warn(`  No Steam data for ${item.appId}`);
       }
@@ -721,7 +730,7 @@ async function main() {
 
   // 1b. Sync wishlist to Supabase
   try {
-    await syncWishlistToDatabase(wishlist, gameDataByAppId);
+    await syncWishlistToDatabase(wishlist, namesByAppId);
   } catch (e) {
     console.error('Failed to sync wishlist to Supabase:', redact(e.message));
     process.exit(1);
