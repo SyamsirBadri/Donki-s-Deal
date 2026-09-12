@@ -40,7 +40,7 @@ jobs:
           # Pin the timezone so Date() math in the script is deterministic
           # regardless of the runner's locale.
           TZ: 'Asia/Kuala_Lumpur'
-        run: node deal-checker_experimental_v2.js
+        run: node deal-checker.js
 
       - name: Notify Discord on failure
         if: failure()
