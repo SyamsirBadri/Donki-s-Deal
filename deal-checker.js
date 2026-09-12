@@ -984,7 +984,10 @@ for (const item of toCheck) {
   historical_low_distance_pct:
   Number.isFinite(Number(bestItadDeal?.price?.amount)) &&
   Number.isFinite(Number(itad?.historyLow?.all?.amount)) &&
-  Number(itad?.historyLow?.all?.amount) > 0
+  Number(itad?.historyLow?.all?.amount) > 0 &&
+  bestItadDeal?.price?.currency &&
+  itad?.historyLow?.all?.currency &&
+  bestItadDeal.price.currency === itad.historyLow.all.currency
     ? ((Number(bestItadDeal.price.amount) -
         Number(itad.historyLow.all.amount)) /
         Number(itad.historyLow.all.amount)) *
