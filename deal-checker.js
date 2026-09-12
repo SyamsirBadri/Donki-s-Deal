@@ -16,18 +16,10 @@ const DRY_RUN_DEAL_ALERTS = false;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
 
-// ITAD shop IDs we specifically track for cross-store price comparison.
-// 61 = Steam. Cross-reference the others against your `tracked_stores`
-// table (or api.isthereanydeal.com/service/shops/v1) if you need names.
 const STEAM_ITAD_SHOP_ID = 61;
 const TRACKED_ITAD_SHOP_IDS = new Set([STEAM_ITAD_SHOP_ID, 6, 35, 37]);
 
 // ─── Startup validation ────────────────────────────────────────
-// ITAD_API_KEY is required here, not optional: wishlist-to-ITAD matching,
-// historical lows, and current cross-store prices all depend on it and
-// will throw and abort the run if it's missing. Only the third-party
-// (Fanatical/Humble/etc.) free-game check treats it as optional, since
-// that source is a nice-to-have rather than part of the core deal flow.
 function assertEnv() {
   const required = {
     STEAM_API_KEY,
@@ -46,20 +38,19 @@ function assertEnv() {
 }
 
 // ─── Secret redaction ──────────────────────────────────────────
-// Several URLs we build (Steam wishlist call, ITAD calls, the Discord
-// webhook itself) carry a secret inline. If a request fails, the raw URL
-// can end up inside an Error message that gets console.error'd — this
-// strips known secret values out of any string before it's logged.
-// (GitHub Actions also masks registered secrets in log output, but that's
-// a safety net, not a reason to leak them into error text in the first place.)
+// Include URL-encoded variants so encoded keys in URLs are also
+// masked if they leak into an error message.
 const SECRETS_TO_REDACT = [
   STEAM_API_KEY,
   ITAD_API_KEY,
   DISCORD_WEBHOOK_URL,
   SUPABASE_SERVICE_KEY,
-].filter(Boolean);
+]
+  .filter(Boolean)
+  .flatMap((s) => [s, encodeURIComponent(s)]);
 
-function redact(str) {
+function redact(input) {
+  const str = typeof input === 'string' ? input : String(input);
   let out = str;
   for (const secret of SECRETS_TO_REDACT) {
     out = out.split(secret).join('[REDACTED]');
@@ -160,13 +151,27 @@ async function supabaseInsert(table, rows) {
   return supabaseRequest('POST', table, { body: rows, headers: { 'Prefer': 'return=minimal' } });
 }
 
-// Upsert avoids piling up duplicate rows for the same app_id on every alert/sighting.
 async function supabaseUpsert(table, rows, conflictColumn) {
   const path = `${table}?on_conflict=${conflictColumn}`;
   return supabaseRequest('POST', path, {
     body: rows,
     headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
   });
+}
+
+// Calls the Postgres function we just created. Returns Map<app_id, lowest_steam_price_myr>.
+async function getSteamPriceLows(appIds) {
+  if (!Array.isArray(appIds) || appIds.length === 0) return new Map();
+  const rows = await supabaseRequest('POST', 'rpc/get_steam_price_lows', {
+    body: { app_ids: appIds },
+  });
+  const map = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (row && row.app_id != null && Number.isFinite(Number(row.historical_low))) {
+      map.set(row.app_id, Number(row.historical_low));
+    }
+  }
+  return map;
 }
 
 // ─── Steam Wishlist ────────────────────────────────────────────
@@ -193,17 +198,13 @@ async function matchWishlistGamesToItad(wishlist) {
     return;
   }
 
-  // Only send games to ITAD that are not already matched.
   const existing = await supabaseQuery('wishlist', {
     select: 'app_id,itad_game_id,itad_match_status',
     where: `app_id=in.(${wishlist.map((item) => item.appId).join(',')})`,
   });
 
   const existingMap = new Map(
-    (Array.isArray(existing) ? existing : []).map((row) => [
-      row.app_id,
-      row,
-    ])
+    (Array.isArray(existing) ? existing : []).map((row) => [row.app_id, row])
   );
 
   const gamesToMatch = wishlist.filter((item) => {
@@ -229,19 +230,13 @@ async function matchWishlistGamesToItad(wishlist) {
 
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(
-      appIds.map((appId) => `app/${appId}`)
-    ),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(appIds.map((appId) => `app/${appId}`)),
   });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(
-      `ITAD batch lookup failed (${response.status}): ${text}`
-    );
+    throw new Error(redact(`ITAD batch lookup failed (${response.status}): ${text}`));
   }
 
   const results = await response.json();
@@ -262,48 +257,28 @@ async function matchWishlistGamesToItad(wishlist) {
         itad_match_source: 'steam_appid',
         itad_matched_at: new Date().toISOString(),
       });
-
       matched++;
-
-      console.log(
-        `  Matched: ${item.appId} → ${itadGameId}`
-      );
+      console.log(`  Matched: ${item.appId} → ${itadGameId}`);
     } else {
       updates.push({
         app_id: item.appId,
-        itad_game_id: item.itadGameId,
+        itad_game_id: null, // ← explicit null, not undefined
         itad_match_status: 'failed',
         itad_match_source: 'steam_appid',
       });
-
       failed++;
-
-      console.log(
-        `  No ITAD match: ${item.appId}`
-      );
+      console.log(`  No ITAD match: ${item.appId}`);
     }
   }
 
   if (updates.length > 0) {
-    await supabaseUpsert(
-      'wishlist',
-      updates,
-      'app_id'
-    );
+    await supabaseUpsert('wishlist', updates, 'app_id');
   }
 
-  console.log(
-    `ITAD matching complete: ${matched} matched, ${failed} not found`
-  );
+  console.log(`ITAD matching complete: ${matched} matched, ${failed} not found`);
 }
 
 // ─── Wishlist Database Sync ───────────────────────────────────
-// `gameDataByAppId` is the Map already built in main() by the single
-// Steam-price-fetch pass — this function makes no network calls of its
-// own. (Previously this re-fetched every game's price/title from Steam
-// a second time just to read the title, doubling both the request count
-// and the per-item rate-limit delay for no benefit — the title was the
-// only thing used from that second call.)
 async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
   if (wishlist.length === 0) {
     console.log('Wishlist is empty — nothing to sync.');
@@ -335,14 +310,12 @@ async function getGamePrice(appId) {
   if (!entry || !entry.data || !entry.data.name) return null;
 
   const priceOverview = entry.data.price_overview;
-  if (!priceOverview) return null; // e.g. free-to-play or delisted — nothing to price
+  if (!priceOverview) return null;
 
   const currentPrice = priceOverview.final / 100;
   const originalPrice = priceOverview.initial / 100;
   const discountPct = priceOverview.discount_percent || 0;
 
-  // Allow currentPrice === 0: a genuine 100%-off promo, not a broken response,
-  // as long as Steam actually returned a price_overview for it.
   if (!Number.isFinite(currentPrice) || currentPrice < 0) return null;
   if (!Number.isFinite(originalPrice) || originalPrice <= 0) return null;
 
@@ -358,13 +331,14 @@ async function getGamePrice(appId) {
 }
 
 // ─── ITAD Current Prices ───────────────────────────────────────
+// Returns Map<app_id, { historyLow, trackedDeals, rawDeals }>.
+// `trackedDeals` is filtered to TRACKED_ITAD_SHOP_IDS and deduped
+// per-shop (cheapest per store). `rawDeals` is everything ITAD sent,
+// used for the informational "other stores" line in Discord.
 async function getItadCurrentPrices(wishlistRows) {
   const map = new Map();
 
-  const games = wishlistRows.filter(
-    (item) => item.itad_game_id
-  );
-
+  const games = wishlistRows.filter((item) => item.itad_game_id);
   if (games.length === 0) {
     console.log('No ITAD-matched wishlist games to query for current prices.');
     return map;
@@ -373,120 +347,66 @@ async function getItadCurrentPrices(wishlistRows) {
   const itadGameIds = games.map((item) => item.itad_game_id);
 
   const url =
-  `https://api.isthereanydeal.com/games/prices/v3` +
-  `?key=${encodeURIComponent(ITAD_API_KEY)}` +
-  `&country=MY`;
+    `https://api.isthereanydeal.com/games/prices/v3` +
+    `?key=${encodeURIComponent(ITAD_API_KEY)}&country=MY`;
 
-console.log(
-  'ITAD current-price URL:',
-  url.replace(ITAD_API_KEY, 'REDACTED')
-);
-
-const response = await fetch(url, {
+  const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(itadGameIds),
   });
 
   if (!response.ok) {
-  const text = await response.text();
-
-  console.warn(
-    `ITAD current-price lookup failed (${response.status}): ${text}`
-  );
-
-  return new Map();
-}
-
-    const results = await response.json();
-
-  console.log(
-  'ITAD current-price sample:',
-  JSON.stringify(results?.[0], null, 2)
-);
-
-const storeCounts = {};
-
-for (const result of results) {
-  for (const deal of result?.deals || []) {
-    const key = `${deal?.shop?.id}:${deal?.shop?.name}`;
-    storeCounts[key] = (storeCounts[key] || 0) + 1;
+    const text = await response.text();
+    console.warn(redact(`ITAD current-price lookup failed (${response.status}): ${text}`));
+    return new Map();
   }
-}
 
-console.log('ITAD current-price stores:', storeCounts);
-
-  const itadToAppId = new Map(
-    games.map((game) => [game.itad_game_id, game.app_id])
-  );
-
-    const trackedShopIds = TRACKED_ITAD_SHOP_IDS;
+  const results = await response.json();
+  const itadToAppId = new Map(games.map((g) => [g.itad_game_id, g.app_id]));
 
   for (const result of Array.isArray(results) ? results : []) {
     const appId = itadToAppId.get(result?.id);
+    if (!appId) continue;
 
-    if (!appId) {
-      continue;
+    const trackedDealsByShop = new Map();
+    for (const deal of result?.deals || []) {
+      const shopId = deal?.shop?.id;
+      if (!TRACKED_ITAD_SHOP_IDS.has(shopId)) continue;
+      const existing = trackedDealsByShop.get(shopId);
+      if (!existing || deal?.price?.amount < existing?.price?.amount) {
+        trackedDealsByShop.set(shopId, deal);
+      }
     }
 
-  const trackedDealsByShop = new Map();
-
-for (const deal of result?.deals || []) {
-  const shopId = deal?.shop?.id;
-
-  if (!trackedShopIds.has(shopId)) {
-    continue;
-  }
-
-  const existing = trackedDealsByShop.get(shopId);
-
-  if (!existing || deal?.price?.amount < existing?.price?.amount) {
-    trackedDealsByShop.set(shopId, deal);
-  }
-}
-
-const trackedDeals = Array.from(trackedDealsByShop.values());
-
     map.set(appId, {
-      ...result,
-      trackedDeals,
+      historyLow: result?.historyLow,
+      trackedDeals: Array.from(trackedDealsByShop.values()),
+      rawDeals: result?.deals || [],
     });
   }
 
-  console.log(
-    `ITAD current prices: ${map.size}/${games.length} games returned`
-  );
-
+  console.log(`ITAD current prices: ${map.size}/${games.length} games returned`);
   return map;
 }
-// ─── Free Games (100% off, any store, not limited to wishlist) ────
-// Each source resolves to a normalized list of:
-//   { id, title, storeName, url }
-// `id` is prefixed per-store (e.g. "steam:730") so free_games_seen can
-// dedupe across stores whose native IDs aren't comparable (Steam app IDs
-// are numeric, Epic's are opaque hex strings, ITAD's are slugs).
 
-// Steam-wide — scans everything Steam is currently featuring as a
-// special, not just your wishlist. Same host as getGamePrice(), so no
-// new blocking risk.
+// ─── Free Games ────────────────────────────────────────────────
 async function getSteamFreebies() {
   const url = 'https://store.steampowered.com/api/featuredcategories?cc=my&l=english';
   const data = await fetchJson(url);
   const items = data?.specials?.items || [];
   const freebies = items.filter((item) => item.discount_percent === 100);
   console.log(`Steam specials scanned: ${items.length}, at 100% off: ${freebies.length}`);
-  return freebies.map((item) => ({
-    id: `steam:${item.id}`,
-    title: item.name,
-    storeName: 'Steam',
-    url: `https://store.steampowered.com/app/${item.id}`,
-  }));
+  return freebies
+    .filter((item) => item.id && item.name)
+    .map((item) => ({
+      id: `steam:${item.id}`,
+      title: item.name,
+      storeName: 'Steam',
+      url: `https://store.steampowered.com/app/${item.id}`,
+    }));
 }
 
-// Epic Games' official public freebies endpoint — no auth, no key,
-// widely used and stable. Confirmed live and working as of this writing.
 async function getEpicFreebies() {
   const url = 'https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=en-US&country=MY&allowCountries=MY';
   const data = await fetchJson(url);
@@ -506,34 +426,25 @@ async function getEpicFreebies() {
   });
   console.log(`Epic catalog scanned: ${elements.length}, currently free: ${freebies.length}`);
 
-  return freebies.map((el) => ({
-    id: `epic:${el.id}`,
-    title: el.title,
-    storeName: 'Epic Games',
-    url: el.productSlug
-      ? `https://store.epicgames.com/p/${el.productSlug}`
-      : 'https://store.epicgames.com/en-US/free-games',
-  }));
+  return freebies
+    .filter((el) => el.id && el.title)
+    .map((el) => ({
+      id: `epic:${el.id}`,
+      title: el.title,
+      storeName: 'Epic Games',
+      url: el.productSlug
+        ? `https://store.epicgames.com/p/${el.productSlug}`
+        : 'https://store.epicgames.com/en-US/free-games',
+    }));
 }
 
-// Third-party keyshops (Fanatical, Humble Store, GOG, etc.) via
-// IsThereAnyDeal — a different service from gg.deals/CheapShark, so the
-// block you're hitting on those two shouldn't apply here. ITAD_API_KEY is
-// validated as required in assertEnv(), so no separate presence check is
-// needed here.
-//
-// NOTE: this endpoint's response shape (list vs. deals, nesting of
-// deal/shop/cut) was not confirmed against a live call while writing this.
-// Trigger it during a known-active third-party freebie and check the logs
-// below — a silent "0 non-Steam free deals" result with no warning could
-// mean the shape assumption is wrong, not that nothing's free right now.
 async function getThirdPartyFreebies() {
-  const url = `https://api.isthereanydeal.com/deals/v2?key=${ITAD_API_KEY}&country=MY&limit=200`;
+  const url = `https://api.isthereanydeal.com/deals/v2?key=${encodeURIComponent(ITAD_API_KEY)}&country=MY&limit=200`;
   let data;
   try {
     data = await fetchJson(url);
   } catch (e) {
-    console.warn('ITAD request failed:', e.message);
+    console.warn('ITAD request failed:', redact(e.message));
     return [];
   }
 
@@ -546,16 +457,18 @@ async function getThirdPartyFreebies() {
   const freeDeals = list.filter((deal) => (deal.deal?.cut ?? deal.cut) === 100);
   const thirdPartyFree = freeDeals.filter((deal) => {
     const shop = (deal.deal?.shop?.name || deal.shop?.name || '').toLowerCase();
-    return shop && shop !== 'steam'; // Steam already covered by getSteamFreebies()
+    return shop && shop !== 'steam';
   });
   console.log(`ITAD deals scanned: ${list.length}, at 100% off: ${freeDeals.length}, non-Steam: ${thirdPartyFree.length}`);
 
-  return thirdPartyFree.map((deal) => ({
-    id: `itad:${deal.id || deal.game?.id}`,
-    title: deal.title || deal.game?.title,
-    storeName: deal.deal?.shop?.name || deal.shop?.name,
-    url: deal.deal?.url || deal.url,
-  }));
+  return thirdPartyFree
+    .map((deal) => ({
+      id: `itad:${deal.id || deal.game?.id}`,
+      title: deal.title || deal.game?.title,
+      storeName: deal.deal?.shop?.name || deal.shop?.name,
+      url: deal.deal?.url || deal.url,
+    }))
+    .filter((fg) => fg.id && fg.title && fg.url);
 }
 
 async function getFreeGames() {
@@ -567,79 +480,49 @@ async function getFreeGames() {
     if (result.status === 'fulfilled') {
       freebies.push(...result.value);
     } else {
-      console.warn(`Free games source #${i} (${sources[i].name}) failed: ${result.reason?.message}`);
+      console.warn(`Free games source #${i} (${sources[i].name}) failed: ${redact(result.reason?.message || String(result.reason))}`);
     }
   });
   return freebies;
 }
 
-// ─── Buy Scoring ────────────────────────────────────────────────
-// V1.1 Buy Score — reflects what's actually implemented below:
+// ─── Buy Scoring (Option A: Steam-only, MYR) ──────────────────
+// Everything scored is Steam and MYR:
+//   Historical-low proximity  up to 3.5 pts  (Steam current vs Steam low, both MYR)
+//   Discount depth            up to 4.0 pts  (% only, currency-agnostic)
+//   Personal interest           flat 1.5 pts (on the Steam wishlist)
+//   Wishlist persistence      up to 0.5 pts  (age)
+//   Exceptional bonus         up to 0.5 pts  (deep discount + near low)
 //
-// Historical-low proximity     up to 3.5 points
-// Discount depth                up to 4.0 points
-// Personal interest (wishlist)  flat 1.5 points
-// Wishlist persistence          up to 0.5 points
-// Exceptional deep-discount bonus up to 0.5 points
+// Cold start: if we have no Steam historical low yet for a game, the
+// historical-low component contributes 0. Scores cap at 6.5/10 until
+// ~30 days of snapshots exist. Nothing is seeded — we only score what
+// we've actually observed.
 //
-// Total                         10 points
-//
-// Affordability is stored as an informational field (affordability_score)
-// but is hardcoded to 0 and does not add to the score — it's a reserved
-// column, not an implemented signal. Cross-store advantage
-// (cross_store_score) is likewise hardcoded to 0; the non-Steam price
-// comparison that used to feed it was removed entirely (see git history)
-// since nothing ever read the values it computed. `best_store` /
-// `best_store_price` elsewhere in main() are unrelated — those come from
-// the single cheapest tracked deal across all stores (including Steam),
-// not from a Steam-vs-non-Steam comparison.
-//
-// The goal is:
-// "Is this a good purchase for me right now?"
-//
-// Wishlist age is intentionally a weak signal.
-// A game being on the wishlist for a long time does NOT mean
-// it is inherently more valuable. Age only provides a small
-// persistence signal.
-//
-// Currency safety:
-// - Steam current price is MYR.
-// - ITAD prices/history are compared only when their currencies match.
-// - No manual currency conversion is performed.
-//
-// Recommendation tiering (buy/watch) is decided by the caller in main()
-// against DEAL_SCORE_THRESHOLD, not in here — this function only returns
-// the raw score and its components.
-
+// Cross-store prices are NOT scored. They appear in the Discord embed
+// as informational lines in their native currency (USD).
 function calculateBuyScore({
   currentPrice,
   currentCurrency,
   steamDiscountPct,
-  itadCurrentPrice,
-  itadCurrentCurrency,
-  itadHistoryLow,
-  itadHistoryLowCurrency,
+  steamHistoricalLow,
+  steamHistoricalLowCurrency,
   daysOnWishlist,
 }) {
-  // ------------------------------------------------------------
-  // 1. Historical-price quality — 3.5 points
-  // How close is the current ITAD price to its historical low?
-  // Only compare values when currencies match.
-  // ------------------------------------------------------------
-
+  // 1. Historical-low proximity (Steam-MY vs Steam-MY) — 3.5 pts
   let historicalLowScore = 0;
   let historicalLowDistancePct = null;
 
   if (
-    Number.isFinite(itadCurrentPrice) &&
-    Number.isFinite(itadHistoryLow) &&
-    itadCurrentCurrency &&
-    itadHistoryLowCurrency &&
-    itadCurrentCurrency === itadHistoryLowCurrency &&
-    itadHistoryLow > 0
+    Number.isFinite(currentPrice) &&
+    Number.isFinite(steamHistoricalLow) &&
+    steamHistoricalLow > 0 &&
+    currentCurrency &&
+    steamHistoricalLowCurrency &&
+    currentCurrency === steamHistoricalLowCurrency
   ) {
     historicalLowDistancePct =
-      ((itadCurrentPrice - itadHistoryLow) / itadHistoryLow) * 100;
+      ((currentPrice - steamHistoricalLow) / steamHistoricalLow) * 100;
 
     if (historicalLowDistancePct <= 5) {
       historicalLowScore = 3.5;
@@ -652,78 +535,33 @@ function calculateBuyScore({
     }
   }
 
-  // ------------------------------------------------------------
-  // 2. Discount depth — 4.0 points
-  // Deeper discounts are increasingly valuable.
-  // ------------------------------------------------------------
-
+  // 2. Discount depth — 4.0 pts
   let discountScore = 0;
   const discountPct = Number(steamDiscountPct);
 
   if (Number.isFinite(discountPct)) {
-    if (discountPct >= 70) {
-      discountScore = 4.0;
-    } else if (discountPct >= 60) {
-      discountScore = 2.75;
-    } else if (discountPct >= 50) {
-      discountScore = 2.5;
-    } else if (discountPct >= 40) {
-      discountScore = 2.0;
-    } else if (discountPct >= 30) {
-      discountScore = 1.5;
-    } else if (discountPct >= 20) {
-      discountScore = 1.0;
-    } else if (discountPct >= 10) {
-      discountScore = 0.5;
-    }
+    if (discountPct >= 70) discountScore = 4.0;
+    else if (discountPct >= 60) discountScore = 2.75;
+    else if (discountPct >= 50) discountScore = 2.5;
+    else if (discountPct >= 40) discountScore = 2.0;
+    else if (discountPct >= 30) discountScore = 1.5;
+    else if (discountPct >= 20) discountScore = 1.0;
+    else if (discountPct >= 10) discountScore = 0.5;
   }
 
-  // ------------------------------------------------------------
-  // 3. Personal interest — 1.5 points
-  // Being on the user's Steam wishlist is the primary signal.
-  // ------------------------------------------------------------
-
+  // 3. Personal interest — flat 1.5 pts
   const wishlistScore = 1.5;
 
-  // ------------------------------------------------------------
-  // 4. Wishlist persistence — 0.5 points
-  // A game that has stayed on the wishlist for a long time gets
-  // a small additional boost.
-  // ------------------------------------------------------------
-
+  // 4. Wishlist persistence — 0.5 pts
   let wishlistPersistenceScore = 0;
+  if (daysOnWishlist >= 730) wishlistPersistenceScore = 0.5;
+  else if (daysOnWishlist >= 365) wishlistPersistenceScore = 0.4;
+  else if (daysOnWishlist >= 180) wishlistPersistenceScore = 0.25;
+  else if (daysOnWishlist >= 90) wishlistPersistenceScore = 0.15;
+  else if (daysOnWishlist >= 30) wishlistPersistenceScore = 0.05;
 
-  if (daysOnWishlist >= 730) {
-    wishlistPersistenceScore = 0.5;
-  } else if (daysOnWishlist >= 365) {
-    wishlistPersistenceScore = 0.4;
-  } else if (daysOnWishlist >= 180) {
-    wishlistPersistenceScore = 0.25;
-  } else if (daysOnWishlist >= 90) {
-    wishlistPersistenceScore = 0.15;
-  } else if (daysOnWishlist >= 30) {
-    wishlistPersistenceScore = 0.05;
-  }
-
-  // ------------------------------------------------------------
-  // 5. Cross-store advantage — reserved, not implemented
-  // The Steam-vs-non-Steam price comparison that used to feed this was
-  // removed (it was computed and never read). Kept as an explicit 0
-  // rather than dropping the field, since cross_store_score is still a
-  // real column in buy_decisions — wire in a real comparison here if
-  // you want this to actually score points later.
-  // ------------------------------------------------------------
-
-  const crossStoreScore = 0;
-
-  // ------------------------------------------------------------
-  // 6. Exceptional deep-discount bonus — 0.5 points
-  // Reward an unusually deep discount when the price is also
-  // reasonably close to the historical low.
-  // ------------------------------------------------------------
-
+  // 5. Exceptional deep-discount bonus — 0.5 pts
   let exceptionalDealScore = 0;
-
   if (
     discountPct >= 70 &&
     Number.isFinite(historicalLowDistancePct) &&
@@ -731,8 +569,8 @@ function calculateBuyScore({
   ) {
     exceptionalDealScore = 0.5;
   }
-  
-    const buyScore = Math.min(
+
+  const buyScore = Math.min(
     10,
     Math.max(
       0,
@@ -744,20 +582,17 @@ function calculateBuyScore({
     )
   );
 
-  // Recommendation tiering happens in main() against DEAL_SCORE_THRESHOLD,
-  // not here — see the comment block above this function.
-
   return {
     buyScore,
     wishlistScore,
     historicalLowScore,
     discountScore,
-    affordabilityScore: 0,
-    crossStoreScore,
     wishlistPersistenceScore,
+    exceptionalDealScore,
     currentPrice,
     currentCurrency,
-    historicalLow: itadHistoryLow,
+    historicalLow: steamHistoricalLow,
+    historicalLowCurrency: steamHistoricalLowCurrency,
     historicalLowDistancePct,
   };
 }
@@ -776,102 +611,86 @@ async function main() {
   assertEnv();
   console.log('Deal Radar: Starting check...');
   const now = new Date();
-  
- // 1. Get wishlist
-let wishlist;
-try {
-  wishlist = await getWishlist();
-} catch (e) {
-  console.error('Failed to fetch wishlist:', e.message);
-  process.exit(1);
-}
 
-// 1a. Fetch Steam price/title data once per wishlist game.
-// This single pass feeds both the Supabase sync below (which only needs
-// the title) and the buy-score evaluation loop further down (which needs
-// the full price/discount data) — so each game only costs one Steam
-// Store API call and one rate-limit delay per run, not two.
-const gameDataByAppId = new Map();
-for (const item of wishlist) {
+  // 1. Get wishlist
+  let wishlist;
   try {
-    const game = await getGamePrice(item.appId);
-    if (game) {
-      gameDataByAppId.set(item.appId, game);
-    } else {
-      console.warn(`Skipping ${item.appId}: Steam price lookup returned no game data`);
-    }
+    wishlist = await getWishlist();
   } catch (e) {
-    console.warn(`Failed to fetch Steam data for app ${item.appId}: ${e.message}`);
+    console.error('Failed to fetch wishlist:', redact(e.message));
+    process.exit(1);
   }
-  await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
-}
 
-// 1b. Sync wishlist to Supabase
-try {
-  await syncWishlistToDatabase(wishlist, gameDataByAppId);
-} catch (e) {
-  console.error('Failed to sync wishlist to Supabase:', e.message);
-  process.exit(1);
-}
+  // 1a. Fetch Steam price/title data once per wishlist game.
+  const gameDataByAppId = new Map();
+  for (const item of wishlist) {
+    try {
+      const game = await getGamePrice(item.appId);
+      if (game) {
+        gameDataByAppId.set(item.appId, game);
+      } else {
+        console.warn(`Skipping ${item.appId}: Steam price lookup returned no game data`);
+      }
+    } catch (e) {
+      console.warn(`Failed to fetch Steam data for app ${item.appId}: ${redact(e.message)}`);
+    }
+    await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
+  }
 
-try {
-  await matchWishlistGamesToItad(wishlist);
-} catch (e) {
-  console.error('Failed to match wishlist to ITAD:', e.message);
-  process.exit(1);
-}
+  // 1b. Sync wishlist to Supabase
+  try {
+    await syncWishlistToDatabase(wishlist, gameDataByAppId);
+  } catch (e) {
+    console.error('Failed to sync wishlist to Supabase:', redact(e.message));
+    process.exit(1);
+  }
 
-    // 1c. Load ITAD IDs from the wishlist
+  // 1c. Match wishlist games to ITAD (skip already-matched)
+  try {
+    await matchWishlistGamesToItad(wishlist);
+  } catch (e) {
+    console.error('Failed to match wishlist to ITAD:', redact(e.message));
+    process.exit(1);
+  }
+
+  // 1d. Load ITAD IDs from the wishlist
   let wishlistWithItad;
   try {
     wishlistWithItad = await supabaseQuery('wishlist', {
       select: 'app_id,itad_game_id,itad_match_status',
     });
   } catch (e) {
-    console.error('Failed to load ITAD wishlist mappings:', e.message);
+    console.error('Failed to load ITAD wishlist mappings:', redact(e.message));
     process.exit(1);
   }
 
   const itadIdByAppId = new Map(
-  (Array.isArray(wishlistWithItad) ? wishlistWithItad : [])
-    .filter((row) => row.itad_game_id)
-    .map((row) => [row.app_id, row.itad_game_id])
-);
+    (Array.isArray(wishlistWithItad) ? wishlistWithItad : [])
+      .filter((row) => row.itad_game_id)
+      .map((row) => [row.app_id, row.itad_game_id])
+  );
 
-  // Historical low comes from getItadCurrentPrices()'s /games/prices/v3
-  // response (itad.historyLow.all below) — that endpoint already returns
-  // it alongside current prices, so there's no separate historical-low
-  // fetch here.
-const currentItadPrices = await getItadCurrentPrices(
-  Array.isArray(wishlistWithItad) ? wishlistWithItad : []
-);
-
-    // Diagnostic: show prices from our tracked stores
-  console.log('\nTracked-store price check:');
-
-  for (const item of wishlistWithItad) {
-    const itad = currentItadPrices.get(item.app_id);
-
-    if (!itad?.trackedDeals?.length) {
-      continue;
-    }
-
-    const prices = itad.trackedDeals.map((deal) => {
-      return `${deal.shop.name}: ${deal.price.amount} ${deal.price.currency}`;
-    });
-
-    console.log(`  ${item.app_id}: ${prices.join(' | ')}`);
+  // 1e. Load Steam-MY historical lows from our own snapshots
+  const currentAppIds = wishlist.map((w) => w.appId);
+  let steamLowByAppId = new Map();
+  try {
+    steamLowByAppId = await getSteamPriceLows(currentAppIds);
+    console.log(`Steam historical lows known for ${steamLowByAppId.size}/${currentAppIds.length} games`);
+  } catch (e) {
+    console.warn('Failed to load Steam historical lows:', redact(e.message));
   }
 
-  console.log('End tracked-store price check.\n');
+  // 1f. Load ITAD current prices (informational — cross-store)
+  const currentItadPrices = await getItadCurrentPrices(
+    Array.isArray(wishlistWithItad) ? wishlistWithItad : []
+  );
 
-    // 1d. Load tracked stores
+  // 1g. Load tracked stores (informational log only)
   let trackedStores;
   try {
     trackedStores = await supabaseQuery('tracked_stores', {
       select: 'store_code,store_name,itad_shop_id,enabled,include_in_comparison,priority',
     });
-
     console.log(
       'Tracked stores:',
       Array.isArray(trackedStores)
@@ -882,10 +701,9 @@ const currentItadPrices = await getItadCurrentPrices(
         : 'none'
     );
   } catch (e) {
-    console.error('Failed to load tracked stores:', e.message);
-    process.exit(1);
+    console.warn('Failed to load tracked stores:', redact(e.message));
   }
-  
+
   // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
   const purchasedSet = new Set(Array.isArray(purchased) ? purchased.map((r) => r.app_id) : []);
@@ -897,217 +715,190 @@ const currentItadPrices = await getItadCurrentPrices(
     Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
   );
 
-  // 4. Prepare accumulators for this run's snapshots and alerts
+  // 4. Accumulators
   const newSnapshots = [];
   const alerts = [];
 
   // 5. Check each game
-  // Reuses the Steam price data fetched once in step 1a — no repeat
-  // Steam Store API calls or delays needed here.
-for (const item of toCheck) {
-  try {
-    const game = gameDataByAppId.get(item.appId);
+  for (const item of toCheck) {
+    try {
+      const game = gameDataByAppId.get(item.appId);
+      if (!game) continue;
 
-if (!game) {
-  // Already logged as a warning in step 1a when the lookup failed.
-  continue;
-}
+      const currentPrice = game.cheapest;
+      const originalPrice = game.originalPrice;
+      const discountPct = game.discountPct;
 
-    const currentPrice = game.cheapest;
-    const originalPrice = game.originalPrice;
-    const discountPct = game.discountPct;
-    const daysOnWishlist = Math.floor(
-      (now - new Date(item.addedAt)) / 86400000
-    );
+      // Guard against null addedAt (some Steam wishlist items lack it).
+      const addedAt = item.addedAt ? new Date(item.addedAt) : null;
+      const daysOnWishlist = addedAt
+        ? Math.max(0, Math.floor((now - addedAt) / 86400000))
+        : 0;
 
-        const itad = currentItadPrices.get(item.appId);
+      const itad = currentItadPrices.get(item.appId);
 
-    const itadDeals = (itad?.trackedDeals || []).filter(
-      (deal) =>
-        Number.isFinite(deal?.price?.amount) &&
-        deal?.price?.currency
-    );
+      // Steam historical low from our own snapshots, with the
+      // current price included so a same-day new low is recognised.
+      const dbLow = steamLowByAppId.get(item.appId);
+      const effectiveSteamLow =
+        dbLow === undefined ? null : Math.min(dbLow, currentPrice);
 
-    const bestItadDeal = itadDeals.length
-  ? itadDeals.reduce((best, deal) => {
-      if (!best) return deal;
+      // Best non-Steam ITAD deal (informational only)
+      const nonSteamDeals = (itad?.rawDeals || []).filter(
+        (deal) =>
+          deal?.shop?.id !== STEAM_ITAD_SHOP_ID &&
+          Number.isFinite(deal?.price?.amount) &&
+          deal?.price?.currency
+      );
+      const otherStores = nonSteamDeals
+        .sort((a, b) => a.price.amount - b.price.amount)
+        .slice(0, 4);
 
-      // Only compare prices when they are in the same currency.
-      if (deal.price.currency !== best.price.currency) {
-        return best;
+      const buyScoreData = calculateBuyScore({
+        currentPrice,
+        currentCurrency: 'MYR',
+        steamDiscountPct: discountPct,
+        steamHistoricalLow: effectiveSteamLow,
+        steamHistoricalLowCurrency: effectiveSteamLow != null ? 'MYR' : null,
+        daysOnWishlist,
+      });
+
+      const buyDecision = {
+        app_id: item.appId,
+        game_name: game.title,
+        itad_game_id: itadIdByAppId.get(item.appId) ?? null,
+
+        buy_score: buyScoreData.buyScore,
+        recommendation: buyScoreData.buyScore >= DEAL_SCORE_THRESHOLD ? 'buy' : 'watch',
+
+        wishlist_score: buyScoreData.wishlistScore,
+        discount_score: buyScoreData.discountScore,
+        historical_low_score: buyScoreData.historicalLowScore,
+        affordability_score: 0,
+        cross_store_score: 0,
+        wishlist_persistence_score: buyScoreData.wishlistPersistenceScore,
+        exceptional_deal_score: buyScoreData.exceptionalDealScore,
+
+        discount_pct: discountPct,
+        current_price: currentPrice,
+        current_currency: 'MYR',
+        current_store: 'Steam',
+
+        historical_low: itad?.historyLow?.all?.amount ?? null,
+        historical_low_currency: itad?.historyLow?.all?.currency ?? null,
+        historical_low_steam: effectiveSteamLow,
+        historical_low_steam_currency: effectiveSteamLow != null ? 'MYR' : null,
+        historical_low_distance_pct: buyScoreData.historicalLowDistancePct,
+
+        itad_current_price: nonSteamDeals[0]?.price?.amount ?? null,
+        itad_current_currency: nonSteamDeals[0]?.price?.currency ?? null,
+
+        best_store: nonSteamDeals[0]?.shop?.name ?? 'Steam',
+        best_store_price: nonSteamDeals[0]?.price?.amount ?? currentPrice,
+        best_store_currency: nonSteamDeals[0]?.price?.currency ?? 'MYR',
+
+        wishlist_days: daysOnWishlist,
+        evaluated_at: now.toISOString(),
+      };
+
+      await supabaseInsert('buy_decisions', [buyDecision]);
+
+      console.log(
+        `  ${game.title}: ` +
+        `price=RM${currentPrice.toFixed(2)} ` +
+        `disc=${discountPct}% ` +
+        `low=${effectiveSteamLow != null ? 'RM' + effectiveSteamLow.toFixed(2) : 'none'} ` +
+        `score=${buyScoreData.buyScore.toFixed(2)} ` +
+        `wishlist=${daysOnWishlist}d`
+      );
+
+      newSnapshots.push({
+        app_id: item.appId,
+        game_name: game.title,
+        itad_game_id: itadIdByAppId.get(item.appId) ?? null,
+        itad_shop_id: STEAM_ITAD_SHOP_ID,
+        price_source: 'steam',
+        store: 'steam',
+        current_price: currentPrice,
+        original_price: originalPrice,
+        discount_pct: discountPct,
+        all_time_low: null,
+        itad_history_low: itad?.historyLow?.all?.amount ?? null,
+        itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
+        currency: 'MYR',
+        store_url: null,
+        deal_score: null,
+        sale_end_date: null,
+        is_best_current_price: false,
+        snapshot_time: now.toISOString(),
+      });
+
+      // Save tracked-store prices from ITAD (informational)
+      for (const deal of itad?.trackedDeals || []) {
+        if (deal?.shop?.id === STEAM_ITAD_SHOP_ID) continue;
+        const shopId = deal?.shop?.id;
+        const shopName = deal?.shop?.name;
+        if (!shopId || !shopName || !Number.isFinite(deal?.price?.amount)) continue;
+
+        newSnapshots.push({
+          app_id: item.appId,
+          game_name: game.title,
+          itad_game_id: itadIdByAppId.get(item.appId) ?? null,
+          itad_shop_id: shopId,
+          price_source: 'itad',
+          store: shopName.toLowerCase(),
+          current_price: deal.price.amount,
+          original_price: deal.regular?.amount ?? deal.price.amount,
+          discount_pct: deal.cut ?? 0,
+          all_time_low: null,
+          itad_history_low: itad?.historyLow?.all?.amount ?? null,
+          itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
+          currency: deal.price.currency ?? null,
+          store_url: deal.url ?? null,
+          deal_score: null,
+          sale_end_date: deal.expiry ?? null,
+          is_best_current_price: false,
+          snapshot_time: now.toISOString(),
+        });
       }
 
-      return deal.price.amount < best.price.amount
-        ? deal
-        : best;
-    }, null)
-  : null;
+      // Deal alert eligibility
+      if (buyDecision.recommendation === 'buy') {
+        const lastNotification = cooldownMap.get(item.appId);
+        const cooldownExpired =
+          !lastNotification ||
+          (now - lastNotification) >= NOTIFICATION_COOLDOWN_HOURS * 60 * 60 * 1000;
 
-const buyScoreData = calculateBuyScore({
-  currentPrice,
-  currentCurrency: 'MYR',
-  steamDiscountPct: discountPct,
-
-  itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
-  itadCurrentCurrency: bestItadDeal?.price?.currency ?? null,
-
-  itadHistoryLow: itad?.historyLow?.all?.amount ?? null,
-  itadHistoryLowCurrency: itad?.historyLow?.all?.currency ?? null,
-
-  daysOnWishlist,
-});
-    
-    const buyDecision = {
-  app_id: item.appId,
-  game_name: game.title,
-  itad_game_id: itadIdByAppId.get(item.appId) ?? null,
-
-  buy_score: buyScoreData.buyScore,
-  recommendation:
-  buyScoreData.buyScore >= DEAL_SCORE_THRESHOLD
-    ? 'buy'
-    : 'watch',
-
-  wishlist_score: buyScoreData.wishlistScore,
-  discount_score: buyScoreData.discountScore,
-  historical_low_score: buyScoreData.historicalLowScore,
-  affordability_score: buyScoreData.affordabilityScore,
-  cross_store_score: buyScoreData.crossStoreScore,
-
-  current_price: currentPrice,
-  current_store: 'Steam',
-
-  itad_current_price: bestItadDeal?.price?.amount ?? null,
-  itad_current_currency: bestItadDeal?.price?.currency ?? null,
-
-  historical_low: itad?.historyLow?.all?.amount ?? null,
-  historical_low_currency: itad?.historyLow?.all?.currency ?? null,
-  // Reuse the value calculateBuyScore() already derived from the same
-  // inputs, instead of recomputing the same formula a second time here.
-  historical_low_distance_pct: buyScoreData.historicalLowDistancePct,
-
-  best_store: bestItadDeal?.shop?.name ?? null,
-  best_store_price: bestItadDeal?.price?.amount ?? null,
-  best_store_currency: bestItadDeal?.price?.currency ?? null,
-
-  wishlist_days: daysOnWishlist,
-  evaluated_at: now.toISOString(),
-};
-
-    await supabaseInsert('buy_decisions', [buyDecision]);
-
-    console.log(
-      `  ${game.title}: ` +
-      `price=RM${currentPrice.toFixed(2)} ` +
-      `orig=RM${originalPrice.toFixed(2)} ` +
-      `disc=${discountPct}% ` +
-      `wishlist=${daysOnWishlist}d`
-    );
-      
-newSnapshots.push({
-  app_id: item.appId,
-  game_name: game.title,
-  itad_game_id: itadIdByAppId.get(item.appId) ?? null,
-  itad_shop_id: STEAM_ITAD_SHOP_ID,
-  price_source: 'steam',
-  store: game.storeName.toLowerCase(),
-  current_price: currentPrice,
-  original_price: originalPrice,
-  discount_pct: discountPct,
-  all_time_low: null,
-  itad_history_low: itad?.historyLow?.all?.amount ?? null,
-  itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
-  currency: 'MYR',
-  store_url: null,
-  deal_score: null,
-  sale_end_date: null,
-  is_best_current_price: false,
-  snapshot_time: now.toISOString(),
-});
-
-// Save tracked-store prices from ITAD
-for (const deal of itad?.trackedDeals || []) {
-  if (deal?.shop?.id === STEAM_ITAD_SHOP_ID) {
-  continue;
-}
-  const shopId = deal?.shop?.id;
-  const shopName = deal?.shop?.name;
-
-  if (!shopId || !shopName || !deal?.price?.amount) {
-    continue;
-  }
-
-  newSnapshots.push({
-    app_id: item.appId,
-    game_name: game.title,
-    itad_game_id: itadIdByAppId.get(item.appId) ?? null,
-    itad_shop_id: shopId,
-    price_source: 'itad',
-    store: shopName.toLowerCase(),
-    current_price: deal.price.amount,
-    original_price: deal.regular?.amount ?? deal.price.amount,
-    discount_pct: deal.cut ?? 0,
-    all_time_low: null,
-    itad_history_low: itad?.historyLow?.all?.amount ?? null,
-    itad_history_low_currency: itad?.historyLow?.all?.currency ?? null,
-    currency: deal.price.currency ?? null,
-    store_url: deal.url ?? null,
-    deal_score: null,
-    sale_end_date: deal.expiry ?? null,
-    is_best_current_price: false,
-    snapshot_time: now.toISOString(),
-  });
-}
-
-      // ─── Deal alert eligibility ────────────────────────────────────
-// Only positive Buy Score recommendations can enter the alert queue.
-//
-// Notification cooldown prevents the same game from being
-// repeatedly alerted every time the workflow runs.
-//
-// Discord sending itself remains protected by DRY_RUN_DEAL_ALERTS.
-
-if (buyDecision.recommendation === 'buy') {
-  const lastNotification = cooldownMap.get(item.appId);
-
-  const cooldownExpired =
-    !lastNotification ||
-    (now - lastNotification) >=
-      NOTIFICATION_COOLDOWN_HOURS * 60 * 60 * 1000;
-
-  if (cooldownExpired) {
-    alerts.push({
-      appId: item.appId,
-      title: game.title,
-      score: buyDecision.buy_score,
-      currentPrice,
-      originalPrice,
-      discountPct,
-      daysOnWishlist,
-      storeName: 'Steam',
-      url: game.url,
-    });
-
-    console.log(
-      `  ALERT ELIGIBLE: ${game.title} ` +
-      `(score=${buyDecision.buy_score.toFixed(2)}, ` +
-      `price=RM${currentPrice.toFixed(2)})`
-    );
-  } else {
-    console.log(
-      `  ALERT COOLDOWN: ${game.title} ` +
-      `(last notified ${lastNotification.toISOString()})`
-    );
-  }
-}
-    
+        if (cooldownExpired) {
+          alerts.push({
+            appId: item.appId,
+            title: game.title,
+            score: buyDecision.buy_score,
+            currentPrice,
+            originalPrice,
+            discountPct,
+            daysOnWishlist,
+            storeName: 'Steam',
+            url: game.url,
+            steamHistoricalLow: effectiveSteamLow,
+            steamHistoricalLowDistancePct: buyScoreData.historicalLowDistancePct,
+            otherStores: otherStores.map((d) => ({
+              shopName: d.shop.name,
+              price: d.price.amount,
+              currency: d.price.currency,
+            })),
+          });
+          console.log(`  ALERT ELIGIBLE: ${game.title} (score=${buyDecision.buy_score.toFixed(2)})`);
+        } else {
+          console.log(`  ALERT COOLDOWN: ${game.title} (last notified ${lastNotification.toISOString()})`);
+        }
+      }
     } catch (e) {
-      console.warn(`Error checking app ${item.appId}: ${e.message}`);
+      console.warn(`Error checking app ${item.appId}: ${redact(e.message)}`);
     }
   }
 
-  // 6. Check free games — Steam-wide, Epic, and third-party keyshops,
-  // independent of your wishlist entirely.
+  // 6. Free games — isolated try/catch per source and per item.
   try {
     const freeGames = await getFreeGames();
     const seenFree = await supabaseQuery('free_games_seen', { select: 'item_id' });
@@ -1115,105 +906,142 @@ if (buyDecision.recommendation === 'buy') {
 
     for (const fg of freeGames) {
       if (!fg.id || seenSet.has(fg.id)) continue;
-      await sendDiscordAlert(
-        `FREE GAME: ${fg.title}\nAvailable on ${fg.storeName}. [Claim Now](${fg.url})`
-      );
-      await supabaseUpsert('free_games_seen', [{ item_id: fg.id, first_seen: now.toISOString() }], 'item_id');
+      try {
+        await sendDiscordAlert(
+          `FREE GAME: ${fg.title}\nAvailable on ${fg.storeName}. [Claim Now](${fg.url})`
+        );
+        await supabaseUpsert(
+          'free_games_seen',
+          [{
+            item_id: fg.id,
+            first_seen: now.toISOString(),
+            game_name: fg.title,
+            store: fg.storeName,
+            store_url: fg.url,
+          }],
+          'item_id'
+        );
+      } catch (e) {
+        console.warn(`Free game alert failed for ${fg.id}: ${redact(e.message)}`);
+      }
     }
   } catch (e) {
-    console.warn('Free games check failed:', e.message);
+    console.warn('Free games check failed:', redact(e.message));
   }
 
-  // 7. Insert snapshots (append-only history — insert is correct here, not upsert)
+  // 7. Send deal alerts BEFORE snapshot insert — an insert failure
+  // must not prevent notifications.
+  let sentDealAlerts = 0;
+  let failedDealAlerts = 0;
+
+  for (const alert of alerts) {
+    const fields = [];
+
+    if (alert.steamHistoricalLow != null) {
+      const distance = alert.steamHistoricalLowDistancePct;
+      fields.push({
+        name: 'Steam historical low (tracker)',
+        value:
+          `RM${alert.steamHistoricalLow.toFixed(2)} ` +
+          `(${distance >= 0 ? '+' : ''}${distance.toFixed(1)}% vs current)`,
+        inline: false,
+      });
+    } else {
+      fields.push({
+        name: 'Steam historical low (tracker)',
+        value: 'Not yet recorded — building history',
+        inline: false,
+      });
+    }
+
+    if (alert.otherStores?.length) {
+      fields.push({
+        name: 'Other stores (informational, not scored)',
+        value: alert.otherStores
+          .map((s) => `• ${s.shopName} — ${s.price} ${s.currency}`)
+          .join('\n'),
+        inline: false,
+      });
+    }
+
+    const embed = {
+      title: `DEAL: ${alert.title}`,
+      description: [
+        `**Score:** ${alert.score.toFixed(2)}/10`,
+        `**Steam:** RM${alert.currentPrice.toFixed(2)} ` +
+          `(was RM${alert.originalPrice.toFixed(2)}, ${alert.discountPct}% off)`,
+        `**On wishlist:** ${alert.daysOnWishlist} days`,
+      ].join('\n'),
+      color: 0x00ff00,
+      url: alert.url,
+      fields,
+    };
+
+    if (DRY_RUN_DEAL_ALERTS) {
+      console.log(
+        `DRY RUN — would send deal alert: ${alert.title} ` +
+        `(score=${alert.score.toFixed(2)}, price=RM${alert.currentPrice.toFixed(2)})`
+      );
+      continue;
+    }
+
+    try {
+      await sendDiscordAlert(`Deal Score ${alert.score.toFixed(2)}`, [embed]);
+
+      // Record cooldown state immediately after Discord send so a
+      // logging failure below can't cause a repeat on the next run.
+      await supabaseUpsert(
+        'last_notified',
+        [{ app_id: alert.appId, last_notification: now.toISOString() }],
+        'app_id'
+      );
+
+      sentDealAlerts++;
+
+      try {
+        await supabaseInsert('notification_log', [{
+          app_id: alert.appId,
+          game_name: alert.title,
+          notification_type: 'deal',
+          buy_score: alert.score,
+          store: alert.storeName,
+          price: alert.currentPrice,
+          currency: 'MYR',
+          historical_low: alert.steamHistoricalLow,
+          sent_at: now.toISOString(),
+        }]);
+      } catch (e) {
+        console.warn(`notification_log insert failed for ${alert.title}: ${redact(e.message)}`);
+      }
+
+      console.log(
+        `Sent deal alert: ${alert.title} ` +
+        `(score=${alert.score.toFixed(2)}, price=RM${alert.currentPrice.toFixed(2)})`
+      );
+    } catch (e) {
+      failedDealAlerts++;
+      console.warn(`Failed to send alert for ${alert.title}: ${redact(e.message)}`);
+    }
+  }
+
+  // 8. Insert snapshots AFTER alerts (failure here no longer blocks notifications).
   if (newSnapshots.length > 0) {
-    await supabaseInsert('price_snapshots', newSnapshots);
-    console.log(`Inserted ${newSnapshots.length} snapshots`);
+    try {
+      await supabaseInsert('price_snapshots', newSnapshots);
+      console.log(`Inserted ${newSnapshots.length} snapshots`);
+    } catch (e) {
+      console.warn(`Snapshot insert failed: ${redact(e.message)}`);
+    }
   }
-
-  // 8. Send deal alerts
-let sentDealAlerts = 0;
-let failedDealAlerts = 0;
-
-for (const alert of alerts) {
-  const embed = {
-    title: `DEAL: ${alert.title}`,
-    description: [
-      `**Score:** ${alert.score.toFixed(2)}/10`,
-      `**Price:** RM${alert.currentPrice.toFixed(2)} (was RM${alert.originalPrice.toFixed(2)}, ${alert.discountPct}% off)`,
-      `**Store:** ${alert.storeName}`,
-      `**On wishlist:** ${alert.daysOnWishlist} days`,
-    ].join('\n'),
-    color: 0x00ff00,
-    url: alert.url,
-  };
 
   if (DRY_RUN_DEAL_ALERTS) {
-    console.log(
-      `DRY RUN — would send deal alert: ${alert.title} ` +
-      `(score=${alert.score.toFixed(2)}, price=RM${alert.currentPrice.toFixed(2)})`
-    );
-    continue;
+    console.log(`Done. ${alerts.length} deal alert(s) eligible; Discord delivery skipped.`);
+  } else {
+    console.log(`Done. ${sentDealAlerts} deal alert(s) sent, ${failedDealAlerts} failed.`);
   }
-
-  try {
-    await sendDiscordAlert(
-      `Deal Score ${alert.score.toFixed(2)}`,
-      [embed]
-    );
-
-        // Record the successful notification in permanent history.
-    await supabaseInsert('notification_log', [{
-      app_id: alert.appId,
-      game_name: alert.title,
-      notification_type: 'deal',
-      buy_score: alert.score,
-      store: alert.storeName,
-      price: alert.currentPrice,
-      currency: 'MYR',
-      historical_low: null,
-      sent_at: now.toISOString(),
-    }]);
-
-    // Update cooldown state only after Discord delivery and
-    // notification history have both been recorded.
-    await supabaseUpsert(
-      'last_notified',
-      [{
-        app_id: alert.appId,
-        last_notification: now.toISOString(),
-      }],
-      'app_id'
-    );
-
-    sentDealAlerts++;
-
-    console.log(
-      `Sent deal alert: ${alert.title} ` +
-      `(score=${alert.score.toFixed(2)}, price=RM${alert.currentPrice.toFixed(2)})`
-    );
-  } catch (e) {
-    failedDealAlerts++;
-
-    console.warn(
-      `Failed to send/record alert for ${alert.title}: ${e.message}`
-    );
-  }
-}
-
-if (DRY_RUN_DEAL_ALERTS) {
-  console.log(
-    `Done. ${alerts.length} deal alert(s) eligible; ` +
-    `Discord delivery skipped because DRY_RUN_DEAL_ALERTS=true.`
-  );
-} else {
-  console.log(
-    `Done. ${sentDealAlerts} deal alert(s) sent, ` +
-    `${failedDealAlerts} failed.`
-  );
-}
 }
 
 main().catch((e) => {
-  console.error('Fatal:', e);
+  console.error('Fatal:', redact(e.stack || e.message || String(e)));
   process.exit(1);
 });
