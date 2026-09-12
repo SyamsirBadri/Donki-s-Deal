@@ -714,13 +714,16 @@ function calculateBuyScore({
   // Both values are ITAD prices in the same currency.
   let historicalLowScore = 0;
 
-  if (
-    Number.isFinite(itadCurrentPrice) &&
-    Number.isFinite(itadHistoricalLow) &&
-    itadHistoricalLow > 0
-  ) {
-    const distancePct =
-      ((itadCurrentPrice - itadHistoricalLow) / itadHistoricalLow) * 100;
+  const currentItadPrice = Number(itadCurrentPrice);
+const historicalLow = Number(itadHistoricalLow);
+
+if (
+  Number.isFinite(currentItadPrice) &&
+  Number.isFinite(historicalLow) &&
+  historicalLow > 0
+) {
+  const distancePct =
+    ((currentItadPrice - historicalLow) / historicalLow) * 100;
 
     if (distancePct <= 5) {
       historicalLowScore = 2;
@@ -924,11 +927,12 @@ const bestItadDeal = itadDeals.length
   historical_low: itad?.historyLow?.all?.amount ?? null,
   historical_low_currency: itad?.historyLow?.all?.currency ?? null,
   historical_low_distance_pct:
-  Number.isFinite(bestItadDeal?.price?.amount) &&
-  Number.isFinite(itad?.historyLow?.all?.amount) &&
-  itad.historyLow.all.amount > 0
-    ? ((bestItadDeal.price.amount - itad.historyLow.all.amount) /
-        itad.historyLow.all.amount) *
+  Number.isFinite(Number(bestItadDeal?.price?.amount)) &&
+  Number.isFinite(Number(itad?.historyLow?.all?.amount)) &&
+  Number(itad?.historyLow?.all?.amount) > 0
+    ? ((Number(bestItadDeal.price.amount) -
+        Number(itad.historyLow.all.amount)) /
+        Number(itad.historyLow.all.amount)) *
       100
     : null,
 
