@@ -969,6 +969,7 @@ for (const item of toCheck) {
 
   wishlist_score: buyScoreData.wishlistScore,
   price_score: 0,
+  discount_score: buyScoreData.discountScore,
   historical_low_score: buyScoreData.historicalLowScore,
   affordability_score: buyScoreData.affordabilityScore,
   cross_store_score: buyScoreData.crossStoreScore,
