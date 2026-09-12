@@ -656,19 +656,26 @@ async function getFreeGames() {
   return freebies;
 }
 
-// ─── Deal Scoring ──────────────────────────────────────────────
-// Same weighting as the original: price-vs-all-time-low dominates (7),
-// discount-vs-original matters some (2), time spent on wishlist adds
-// a little patience credit (1).
+// ─── Buy Scoring ────────────────────────────────────────────────
+// V1 Buy Score:
 //
-// priceFactor is scaled against THIS GAME's own range (original price
-// down to its all-time low), not an unbounded ratio. That keeps it in
-// [0, 7]: 7 when today's price ties the all-time low, 0 when it's at
-// (or above) full price, and a smooth reward in between. Because
-// allTimeLow = min(currentPrice, priorLow) by construction, currentPrice
-// can never be below allTimeLow — a naive (1 - currentPrice/allTimeLow)
-// ratio is therefore always <= 0 and can never reward a real discount,
-// which is why every score floored at 0 before this fix.
+// Personal interest       3 points
+// Absolute price          3 points
+// Historical price        2 points
+// Cross-store advantage   1 point
+// Discount                1 point
+//
+// Total                   10 points
+//
+// The goal is not to reward the biggest percentage discount.
+// The score should answer:
+// "Is this a good purchase for me right now?"
+//
+// Currency safety:
+// - Steam current price is MYR.
+// - ITAD prices/history are compared only when their currencies match.
+// - No manual currency conversion is performed.
+
 function calculateBuyScore({
   currentPrice,
   daysOnWishlist,
@@ -679,42 +686,57 @@ function calculateBuyScore({
   itadHistoricalLowCurrency,
   itadDealsForScoring,
 }) {
-  // 1. Wishlist desire
+  // 1. Personal interest — maximum 3 points.
+  //
+  // Wishlist age is a proxy for how long the game has remained
+  // interesting to you. It reaches the maximum after one year.
   const wishlistScore =
-    Math.min(daysOnWishlist / 365, 1) * 3;
+    Math.min(Math.max(daysOnWishlist, 0) / 365, 1) * 3;
 
-  // 2. Absolute Steam price
+  // 2. Absolute Steam price — maximum 3 points.
+  //
+  // This deliberately uses the real Malaysian Steam price.
+  // Discount percentage does not determine affordability.
   let affordabilityScore = 0;
 
-  if (currentPrice <= 20) {
-    affordabilityScore = 3;
-  } else if (currentPrice <= 40) {
-    affordabilityScore = 2.5;
-  } else if (currentPrice <= 60) {
-    affordabilityScore = 2;
-  } else if (currentPrice <= 100) {
-    affordabilityScore = 1.5;
-  } else if (currentPrice <= 150) {
-    affordabilityScore = 1;
-  } else if (currentPrice <= 200) {
-    affordabilityScore = 0.5;
+  if (Number.isFinite(currentPrice) && currentPrice >= 0) {
+    if (currentPrice <= 20) {
+      affordabilityScore = 3;
+    } else if (currentPrice <= 40) {
+      affordabilityScore = 2.5;
+    } else if (currentPrice <= 60) {
+      affordabilityScore = 2;
+    } else if (currentPrice <= 100) {
+      affordabilityScore = 1.5;
+    } else if (currentPrice <= 150) {
+      affordabilityScore = 1;
+    } else if (currentPrice <= 200) {
+      affordabilityScore = 0.5;
+    }
   }
 
-  // 3. Discount is supporting evidence only.
+  // 3. Discount — maximum 1 point.
+  //
+  // Supporting signal only. A large discount should not by itself
+  // turn an unwanted/expensive game into a buy recommendation.
   let discountScore = 0;
 
-  if (discountPct >= 50) {
-    discountScore = 1;
-  } else if (discountPct >= 30) {
-    discountScore = 0.7;
-  } else if (discountPct >= 15) {
-    discountScore = 0.4;
-  } else if (discountPct > 0) {
-    discountScore = 0.2;
+  if (Number.isFinite(discountPct) && discountPct > 0) {
+    if (discountPct >= 50) {
+      discountScore = 1;
+    } else if (discountPct >= 30) {
+      discountScore = 0.7;
+    } else if (discountPct >= 15) {
+      discountScore = 0.4;
+    } else {
+      discountScore = 0.2;
+    }
   }
 
-  // 4. Historical-low proximity.
-  // Both values are ITAD prices in the same currency.
+  // 4. Historical price quality — maximum 2 points.
+  //
+  // Compare ITAD current price against ITAD historical low only
+  // when both values are present and use the same currency.
   let historicalLowScore = 0;
 
   const currentItadPrice = Number(itadCurrentPrice);
@@ -728,8 +750,8 @@ function calculateBuyScore({
     itadHistoricalLowCurrency &&
     itadCurrentCurrency === itadHistoricalLowCurrency
   ) {
-  const distancePct =
-    ((currentItadPrice - historicalLow) / historicalLow) * 100;
+    const distancePct =
+      ((currentItadPrice - historicalLow) / historicalLow) * 100;
 
     if (distancePct <= 5) {
       historicalLowScore = 2;
@@ -740,41 +762,51 @@ function calculateBuyScore({
     } else if (distancePct <= 50) {
       historicalLowScore = 0.5;
     }
-    }
+  }
 
-  // 5. Cross-store advantage.
-  // Compare the best tracked-store price against the Steam price
-  // reported by ITAD. This is a relative store comparison only;
-  // we do not convert currencies manually.
+  // 5. Cross-store advantage — maximum 1 point.
+  //
+  // ITAD is used for relative store comparison.
+  // Only compare deals that share the same currency.
   let crossStoreScore = 0;
 
-  const steamItadDeal = itadDealsForScoring?.find(
+  const deals = Array.isArray(itadDealsForScoring)
+    ? itadDealsForScoring
+    : [];
+
+  const steamItadDeal = deals.find(
     (deal) => deal?.shop?.id === 61
   );
 
-  const bestNonSteamItadDeal = itadDealsForScoring
-  ?.filter((deal) => deal?.shop?.id !== 61)
-  ?.reduce((best, deal) => {
-    if (!best) return deal;
+  const bestNonSteamItadDeal = deals
+    .filter((deal) => deal?.shop?.id !== 61)
+    .reduce((best, deal) => {
+      if (!best) return deal;
 
-    // Only compare prices when they are in the same currency.
-    if (deal.price.currency !== best.price.currency) {
-      return best;
-    }
+      if (
+        deal?.price?.currency !== best?.price?.currency
+      ) {
+        return best;
+      }
 
-    return deal.price.amount < best.price.amount
-      ? deal
-      : best;
-  }, null);
+      return Number(deal?.price?.amount) <
+        Number(best?.price?.amount)
+        ? deal
+        : best;
+    }, null);
 
   if (
-    steamItadDeal?.price?.amount > 0 &&
-    bestNonSteamItadDeal?.price?.amount > 0 &&
-    steamItadDeal.price.currency === bestNonSteamItadDeal.price.currency
+    Number(steamItadDeal?.price?.amount) > 0 &&
+    Number(bestNonSteamItadDeal?.price?.amount) > 0 &&
+    steamItadDeal?.price?.currency &&
+    bestNonSteamItadDeal?.price?.currency &&
+    steamItadDeal.price.currency ===
+      bestNonSteamItadDeal.price.currency
   ) {
     const storeSavingsPct =
-      ((steamItadDeal.price.amount - bestNonSteamItadDeal.price.amount) /
-        steamItadDeal.price.amount) *
+      ((Number(steamItadDeal.price.amount) -
+        Number(bestNonSteamItadDeal.price.amount)) /
+        Number(steamItadDeal.price.amount)) *
       100;
 
     if (storeSavingsPct >= 20) {
@@ -786,23 +818,27 @@ function calculateBuyScore({
     }
   }
 
-    const rawScore =
+  // Final Buy Score.
+  const rawScore =
     wishlistScore +
     affordabilityScore +
-    discountScore +
     historicalLowScore +
-    crossStoreScore;
+    crossStoreScore +
+    discountScore;
 
-  const buyScore = Math.max(0, Math.min(10, rawScore));
+  const buyScore = Math.max(
+    0,
+    Math.min(10, rawScore)
+  );
 
   return {
-  buyScore,
-  wishlistScore,
-  affordabilityScore,
-  discountScore,
-  historicalLowScore,
-  crossStoreScore,
-};
+    buyScore,
+    wishlistScore,
+    affordabilityScore,
+    discountScore,
+    historicalLowScore,
+    crossStoreScore,
+  };
 }
 
 // ─── Discord Notification ──────────────────────────────────────
