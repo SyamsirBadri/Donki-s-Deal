@@ -15,7 +15,6 @@ const NOTIFICATION_COOLDOWN_HOURS = 24;
 const DRY_RUN_DEAL_ALERTS = false;
 const LIVE_TEST_APP_ID = 2198800;
 const REQUEST_TIMEOUT_MS = 10000;
-const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
 
 // ─── Startup validation ────────────────────────────────────────
