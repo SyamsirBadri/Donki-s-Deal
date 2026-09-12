@@ -16,9 +16,10 @@ const MIN_HISTORY_DAYS_FOR_LOW = 14;
 const DRY_RUN_DEAL_ALERTS = false;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
+const STEAM_BATCH_SIZE = 40;
 
 const STEAM_ITAD_SHOP_ID = 61;
-const TRACKED_ITAD_SHOP_IDS = new Set([STEAM_ITAD_SHOP_ID, 6, 35, 37]);
+const DEFAULT_TRACKED_ITAD_SHOP_IDS = new Set([STEAM_ITAD_SHOP_ID, 6, 35, 37]);
 
 // ─── Startup validation ────────────────────────────────────────
 function assertEnv() {
@@ -55,6 +56,14 @@ function redact(input) {
   let out = str;
   for (const secret of SECRETS_TO_REDACT) {
     out = out.split(secret).join('[REDACTED]');
+  }
+  return out;
+}
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
   }
   return out;
 }
@@ -312,32 +321,93 @@ async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
   console.log(`Wishlist sync complete: ${rows.length} synced`);
 }
 
-// ─── Steam Store Price (Malaysia) ──────────────────────────────
-async function getGamePrice(appId) {
-  const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=my`;
-  const data = await fetchJson(url);
-  const entry = data?.[appId];
-  if (!entry || !entry.data || !entry.data.name) return null;
+// ─── Steam Store Prices (Malaysia, batched) ────────────────────
+// Fetches price + title for the whole wishlist in batches, instead
+// of one HTTP request per game. Steam's appdetails endpoint accepts
+// comma-separated appids and returns an object keyed by appid string.
+//
+// Returns Map<app_id, { title, cheapest, originalPrice, discountPct,
+//                       isOnSale, storeName, url }> — the same shape
+// the old single-game getGamePrice() returned, so downstream code
+// doesn't need to change.
+async function fetchAllSteamPrices(appIds) {
+  const result = new Map();
+  if (!Array.isArray(appIds) || appIds.length === 0) return result;
 
-  const priceOverview = entry.data.price_overview;
-  if (!priceOverview) return null;
+  const batches = chunk(appIds, STEAM_BATCH_SIZE);
+  console.log(`Steam price fetch: ${appIds.length} games in ${batches.length} batch(es)`);
 
-  const currentPrice = priceOverview.final / 100;
-  const originalPrice = priceOverview.initial / 100;
-  const discountPct = priceOverview.discount_percent || 0;
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
 
-  if (!Number.isFinite(currentPrice) || currentPrice < 0) return null;
-  if (!Number.isFinite(originalPrice) || originalPrice <= 0) return null;
+    // `filters` trims the response to just what we use. If Steam ever
+    // rejects the filter, remove it — the default payload also works,
+    // it's just larger.
+    const url =
+      `https://store.steampowered.com/api/appdetails` +
+      `?appids=${batch.join(',')}&cc=my` +
+      `&filters=basic,price_overview,release_date`;
 
-  return {
-    title: entry.data.name,
-    cheapest: currentPrice,
-    originalPrice,
-    discountPct,
-    isOnSale: discountPct > 0,
-    storeName: 'Steam',
-    url: `https://store.steampowered.com/app/${appId}`,
-  };
+    let data;
+    try {
+      data = await fetchJson(url);
+    } catch (e) {
+      console.warn(`Steam batch ${i + 1}/${batches.length} failed: ${redact(e.message)}`);
+      // Fall through: games in this batch just won't be in the map.
+    }
+
+    if (data) {
+      for (const appId of batch) {
+        const entry = data?.[appId];
+        if (!entry?.data?.name) {
+          console.log(`  No Steam data for ${appId}`);
+          continue;
+        }
+
+        const priceOverview = entry.data.price_overview;
+
+        if (!priceOverview) {
+          // Log why — previously this was collapsed into a generic
+          // "no game data" warning. Distinguishing these three cases
+          // makes the logs far easier to read.
+          const isComingSoon = entry.data.release_date?.coming_soon === true;
+          const isFree = entry.data.is_free === true;
+          if (isComingSoon) {
+            console.log(`  Coming soon (no price yet): ${appId} — ${entry.data.name}`);
+          } else if (isFree) {
+            console.log(`  Free-to-play: ${appId} — ${entry.data.name}`);
+          } else {
+            console.log(`  No Steam-MY price: ${appId} — ${entry.data.name}`);
+          }
+          continue;
+        }
+
+        const currentPrice = priceOverview.final / 100;
+        const originalPrice = priceOverview.initial / 100;
+        const discountPct = priceOverview.discount_percent || 0;
+
+        if (!Number.isFinite(currentPrice) || currentPrice < 0) continue;
+        if (!Number.isFinite(originalPrice) || originalPrice <= 0) continue;
+
+        result.set(Number(appId), {
+          title: entry.data.name,
+          cheapest: currentPrice,
+          originalPrice,
+          discountPct,
+          isOnSale: discountPct > 0,
+          storeName: 'Steam',
+          url: `https://store.steampowered.com/app/${appId}`,
+        });
+      }
+    }
+
+    // Sleep between batches, not after the last one.
+    if (i < batches.length - 1) {
+      await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
+    }
+  }
+
+  return result;
 }
 
 // ─── ITAD Current Prices ───────────────────────────────────────
@@ -345,7 +415,7 @@ async function getGamePrice(appId) {
 // `trackedDeals` is filtered to TRACKED_ITAD_SHOP_IDS and deduped
 // per-shop (cheapest per store). `rawDeals` is everything ITAD sent,
 // used for the informational "other stores" line in Discord.
-async function getItadCurrentPrices(wishlistRows) {
+async function getItadCurrentPrices(wishlistRows, trackedShopIds) {
   const map = new Map();
 
   const games = wishlistRows.filter((item) => item.itad_game_id);
@@ -379,10 +449,10 @@ async function getItadCurrentPrices(wishlistRows) {
     const appId = itadToAppId.get(result?.id);
     if (!appId) continue;
 
-    const trackedDealsByShop = new Map();
+        const trackedDealsByShop = new Map();
     for (const deal of result?.deals || []) {
       const shopId = deal?.shop?.id;
-      if (!TRACKED_ITAD_SHOP_IDS.has(shopId)) continue;
+      if (!trackedShopIds.has(shopId)) continue;
       const existing = trackedDealsByShop.get(shopId);
       if (!existing || deal?.price?.amount < existing?.price?.amount) {
         trackedDealsByShop.set(shopId, deal);
@@ -631,20 +701,18 @@ async function main() {
     process.exit(1);
   }
 
-  // 1a. Fetch Steam price/title data once per wishlist game.
-  const gameDataByAppId = new Map();
-  for (const item of wishlist) {
-    try {
-      const game = await getGamePrice(item.appId);
-      if (game) {
-        gameDataByAppId.set(item.appId, game);
-      } else {
-        console.warn(`Skipping ${item.appId}: Steam price lookup returned no game data`);
-      }
-    } catch (e) {
-      console.warn(`Failed to fetch Steam data for app ${item.appId}: ${redact(e.message)}`);
-    }
-    await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
+  // 1a. Fetch Steam price/title data for the whole wishlist in batches.
+  let gameDataByAppId;
+  try {
+    gameDataByAppId = await fetchAllSteamPrices(wishlist.map((w) => w.appId));
+  } catch (e) {
+    console.error('Failed to fetch Steam prices:', redact(e.message));
+    process.exit(1);
+  }
+  if (gameDataByAppId.size === 0) {
+    console.warn('No Steam prices fetched — check the batch logs above.');
+  } else {
+    console.log(`Steam prices fetched: ${gameDataByAppId.size}/${wishlist.length}`);
   }
 
   // 1b. Sync wishlist to Supabase
@@ -690,29 +758,46 @@ async function main() {
     console.warn('Failed to load Steam historical lows:', redact(e.message));
   }
 
-  // 1f. Load ITAD current prices (informational — cross-store)
-  const currentItadPrices = await getItadCurrentPrices(
-    Array.isArray(wishlistWithItad) ? wishlistWithItad : []
-  );
-
-  // 1g. Load tracked stores (informational log only)
-  let trackedStores;
+  // 1f. Load tracked stores — the source of truth for which ITAD
+  // shops count as "tracked" for cross-store snapshots and alerts.
+  // Falls back to DEFAULT_TRACKED_ITAD_SHOP_IDS if the query fails
+  // or the table is empty.
+  let trackedShopIds = DEFAULT_TRACKED_ITAD_SHOP_IDS;
   try {
-    trackedStores = await supabaseQuery('tracked_stores', {
+    const trackedStores = await supabaseQuery('tracked_stores', {
       select: 'store_code,store_name,itad_shop_id,enabled,include_in_comparison,priority',
     });
-    console.log(
-      'Tracked stores:',
-      Array.isArray(trackedStores)
-        ? trackedStores
-            .filter((store) => store.enabled)
-            .map((store) => `${store.store_name} (${store.itad_shop_id ?? 'no ITAD ID'})`)
-            .join(', ')
-        : 'none'
-    );
+
+    if (Array.isArray(trackedStores) && trackedStores.length > 0) {
+      const enabled = trackedStores.filter(
+        (s) => s.enabled && s.include_in_comparison && s.itad_shop_id != null
+      );
+
+      if (enabled.length > 0) {
+        trackedShopIds = new Set(enabled.map((s) => s.itad_shop_id));
+        // Steam is always included, even if its row is misconfigured.
+        trackedShopIds.add(STEAM_ITAD_SHOP_ID);
+      }
+
+      console.log(
+        'Tracked stores:',
+        trackedStores
+          .filter((s) => s.enabled)
+          .map((s) => `${s.store_name} (${s.itad_shop_id ?? 'no ITAD ID'})`)
+          .join(', ')
+      );
+    } else {
+      console.warn('tracked_stores is empty — using default shop list');
+    }
   } catch (e) {
-    console.warn('Failed to load tracked stores:', redact(e.message));
+    console.warn('Failed to load tracked stores, using defaults:', redact(e.message));
   }
+
+  // 1g. Load ITAD current prices (informational — cross-store)
+  const currentItadPrices = await getItadCurrentPrices(
+    Array.isArray(wishlistWithItad) ? wishlistWithItad : [],
+    trackedShopIds
+  );
 
   // 2. Get purchased games
   const purchased = await supabaseQuery('purchased', { select: 'app_id' });
