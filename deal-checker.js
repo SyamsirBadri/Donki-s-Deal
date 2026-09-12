@@ -1004,15 +1004,49 @@ if (!game) {
     }, null)
   : null;
 
-    const buyScoreData = calculateBuyScore({
+    const steamItadDeal = itadDeals.find(
+  (deal) => deal?.shop?.id === 61
+);
+
+const nonSteamItadDeals = itadDeals.filter(
+  (deal) => deal?.shop?.id !== 61
+);
+
+const bestNonSteamItadDeal = nonSteamItadDeals.reduce(
+  (best, deal) => {
+    if (!best) return deal;
+
+    if (deal.price.currency !== best.price.currency) {
+      return best;
+    }
+
+    return deal.price.amount < best.price.amount
+      ? deal
+      : best;
+  },
+  null
+);
+
+const buyScoreData = calculateBuyScore({
   currentPrice,
-  daysOnWishlist,
-  discountPct,
+  currentCurrency: 'MYR',
+  steamDiscountPct: discountPct,
+
   itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
   itadCurrentCurrency: bestItadDeal?.price?.currency ?? null,
-  itadHistoricalLow: itad?.historyLow?.all?.amount ?? null,
-  itadHistoricalLowCurrency: itad?.historyLow?.all?.currency ?? null,
-  itadDealsForScoring: itadDeals,
+
+  itadHistoryLow: itad?.historyLow?.all?.amount ?? null,
+  itadHistoryLowCurrency: itad?.historyLow?.all?.currency ?? null,
+
+  steamItadPrice: steamItadDeal?.price?.amount ?? null,
+  steamItadCurrency: steamItadDeal?.price?.currency ?? null,
+
+  bestNonSteamItadPrice:
+    bestNonSteamItadDeal?.price?.amount ?? null,
+  bestNonSteamItadCurrency:
+    bestNonSteamItadDeal?.price?.currency ?? null,
+
+  daysOnWishlist,
 });
     
     const buyDecision = {
