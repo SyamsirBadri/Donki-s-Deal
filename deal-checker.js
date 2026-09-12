@@ -1228,6 +1228,9 @@ if (buyDecision.recommendation === 'buy') {
   }
 
   // 8. Send deal alerts
+let sentDealAlerts = 0;
+let failedDealAlerts = 0;
+
 for (const alert of alerts) {
   const embed = {
     title: `DEAL: ${alert.title}`,
@@ -1250,7 +1253,10 @@ for (const alert of alerts) {
   }
 
   try {
-    await sendDiscordAlert(`Deal Score ${alert.score.toFixed(2)}`, [embed]);
+    await sendDiscordAlert(
+      `Deal Score ${alert.score.toFixed(2)}`,
+      [embed]
+    );
 
     await supabaseUpsert(
       'last_notified',
@@ -1260,14 +1266,33 @@ for (const alert of alerts) {
       }],
       'app_id'
     );
+
+    sentDealAlerts++;
+
+    console.log(
+      `Sent deal alert: ${alert.title} ` +
+      `(score=${alert.score.toFixed(2)}, price=RM${alert.currentPrice.toFixed(2)})`
+    );
   } catch (e) {
+    failedDealAlerts++;
+
     console.warn(
       `Failed to send/record alert for ${alert.title}: ${e.message}`
     );
   }
 }
 
-  console.log(`Done. ${alerts.length} deal alert(s) sent.`);
+if (DRY_RUN_DEAL_ALERTS) {
+  console.log(
+    `Done. ${alerts.length} deal alert(s) eligible; ` +
+    `Discord delivery skipped because DRY_RUN_DEAL_ALERTS=true.`
+  );
+} else {
+  console.log(
+    `Done. ${sentDealAlerts} deal alert(s) sent, ` +
+    `${failedDealAlerts} failed.`
+  );
+}
 }
 
 main().catch((e) => {
