@@ -753,14 +753,19 @@ function calculateBuyScore({
   );
 
   const bestNonSteamItadDeal = itadDealsForScoring
-    ?.filter((deal) => deal?.shop?.id !== 61)
-    ?.reduce((best, deal) => {
-      if (!best) return deal;
+  ?.filter((deal) => deal?.shop?.id !== 61)
+  ?.reduce((best, deal) => {
+    if (!best) return deal;
 
-      return deal.price.amount < best.price.amount
-        ? deal
-        : best;
-    }, null);
+    // Only compare prices when they are in the same currency.
+    if (deal.price.currency !== best.price.currency) {
+      return best;
+    }
+
+    return deal.price.amount < best.price.amount
+      ? deal
+      : best;
+  }, null);
 
   if (
     steamItadDeal?.price?.amount > 0 &&
