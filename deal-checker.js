@@ -357,78 +357,6 @@ async function getGamePrice(appId) {
   };
 }
 
-// ─── ITAD Historical Low Prices ────────────────────────────────
-async function getItadHistoricalLows(wishlistRows) {
-  const map = new Map();
-
-  const games = wishlistRows.filter(
-    (item) => item.itad_game_id
-  );
-
-  const itadToAppId = new Map(
-    games.map((game) => [game.itad_game_id, game.app_id])
-  );
-
-  if (games.length === 0) {
-    console.log('No ITAD-matched wishlist games to query for historical lows.');
-    return map;
-  }
-
-  const itadGameIds = games.map((item) => item.itad_game_id);
-
-  const url =
-    `https://api.isthereanydeal.com/games/historylow/v1` +
-    `?key=${encodeURIComponent(ITAD_API_KEY)}` +
-    `&country=MY`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(itadGameIds),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(
-      `ITAD historical-low lookup failed (${response.status}): ${text}`
-    );
-  }
-
-  const results = await response.json();
-
-  for (const result of Array.isArray(results) ? results : []) {
-    const low = result?.low;
-
-    if (
-      result?.id &&
-      low?.price?.amount !== undefined &&
-      low?.price?.currency
-    ) {
-      const appId = itadToAppId.get(result.id);
-
-      if (!appId) {
-        continue;
-      }
-
-      map.set(appId, {
-        price: Number(low.price.amount),
-        currency: low.price.currency,
-        store: low.shop?.name || null,
-        storeId: low.shop?.id || null,
-        timestamp: low.timestamp || null,
-      });
-    }
-  }
-
-  console.log(
-    `ITAD historical lows: ${map.size}/${games.length} games returned`
-  );
-
-  return map;
-}
-
 // ─── ITAD Current Prices ───────────────────────────────────────
 async function getItadCurrentPrices(wishlistRows) {
   const map = new Map();
@@ -656,12 +584,15 @@ async function getFreeGames() {
 //
 // Total                         10 points
 //
-// Affordability and cross-store advantage are computed/stored as
-// informational fields (affordability_score, cross_store_score,
-// best_store/best_store_price) but do NOT currently add to the score —
-// they're reserved for a future scoring pass rather than dead intent.
-// If you want them to actually score, they need real weight here, not
-// just a hardcoded 0.
+// Affordability is stored as an informational field (affordability_score)
+// but is hardcoded to 0 and does not add to the score — it's a reserved
+// column, not an implemented signal. Cross-store advantage
+// (cross_store_score) is likewise hardcoded to 0; the non-Steam price
+// comparison that used to feed it was removed entirely (see git history)
+// since nothing ever read the values it computed. `best_store` /
+// `best_store_price` elsewhere in main() are unrelated — those come from
+// the single cheapest tracked deal across all stores (including Steam),
+// not from a Steam-vs-non-Steam comparison.
 //
 // The goal is:
 // "Is this a good purchase for me right now?"
@@ -688,10 +619,6 @@ function calculateBuyScore({
   itadCurrentCurrency,
   itadHistoryLow,
   itadHistoryLowCurrency,
-  steamItadPrice,
-  steamItadCurrency,
-  bestNonSteamItadPrice,
-  bestNonSteamItadCurrency,
   daysOnWishlist,
 }) {
   // ------------------------------------------------------------
@@ -779,9 +706,12 @@ function calculateBuyScore({
   }
 
   // ------------------------------------------------------------
-  // 5. Cross-store advantage — informational only
-  // Cross-store pricing is shown for comparison, but it does not
-  // increase the Buy Score.
+  // 5. Cross-store advantage — reserved, not implemented
+  // The Steam-vs-non-Steam price comparison that used to feed this was
+  // removed (it was computed and never read). Kept as an explicit 0
+  // rather than dropping the field, since cross_store_score is still a
+  // real column in buy_decisions — wire in a real comparison here if
+  // you want this to actually score points later.
   // ------------------------------------------------------------
 
   const crossStoreScore = 0;
@@ -908,10 +838,10 @@ try {
     .map((row) => [row.app_id, row.itad_game_id])
 );
 
-  const historicalLows = await getItadHistoricalLows(
-  Array.isArray(wishlistWithItad) ? wishlistWithItad : []
-);
-
+  // Historical low comes from getItadCurrentPrices()'s /games/prices/v3
+  // response (itad.historyLow.all below) — that endpoint already returns
+  // it alongside current prices, so there's no separate historical-low
+  // fetch here.
 const currentItadPrices = await getItadCurrentPrices(
   Array.isArray(wishlistWithItad) ? wishlistWithItad : []
 );
@@ -1013,29 +943,6 @@ if (!game) {
     }, null)
   : null;
 
-    const steamItadDeal = itadDeals.find(
-  (deal) => deal?.shop?.id === STEAM_ITAD_SHOP_ID
-);
-
-const nonSteamItadDeals = itadDeals.filter(
-  (deal) => deal?.shop?.id !== STEAM_ITAD_SHOP_ID
-);
-
-const bestNonSteamItadDeal = nonSteamItadDeals.reduce(
-  (best, deal) => {
-    if (!best) return deal;
-
-    if (deal.price.currency !== best.price.currency) {
-      return best;
-    }
-
-    return deal.price.amount < best.price.amount
-      ? deal
-      : best;
-  },
-  null
-);
-
 const buyScoreData = calculateBuyScore({
   currentPrice,
   currentCurrency: 'MYR',
@@ -1046,14 +953,6 @@ const buyScoreData = calculateBuyScore({
 
   itadHistoryLow: itad?.historyLow?.all?.amount ?? null,
   itadHistoryLowCurrency: itad?.historyLow?.all?.currency ?? null,
-
-  steamItadPrice: steamItadDeal?.price?.amount ?? null,
-  steamItadCurrency: steamItadDeal?.price?.currency ?? null,
-
-  bestNonSteamItadPrice:
-    bestNonSteamItadDeal?.price?.amount ?? null,
-  bestNonSteamItadCurrency:
-    bestNonSteamItadDeal?.price?.currency ?? null,
 
   daysOnWishlist,
 });
