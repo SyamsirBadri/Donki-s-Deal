@@ -867,6 +867,18 @@ for (const item of toCheck) {
       discountPct,
     });
 
+    const itadDeals = (itad?.trackedDeals || []).filter(
+  (deal) =>
+    Number.isFinite(deal?.price?.amount) &&
+    deal?.price?.currency
+);
+
+const bestItadDeal = itadDeals.length
+  ? itadDeals.reduce((best, deal) =>
+      deal.price.amount < best.price.amount ? deal : best
+    )
+  : null;
+    
     const buyDecision = {
   app_id: item.appId,
   game_name: game.title,
@@ -884,12 +896,16 @@ for (const item of toCheck) {
   current_price: currentPrice,
   current_store: 'Steam',
 
+  itad_current_price: bestItadDeal?.price?.amount ?? null,
+  itad_current_currency: bestItadDeal?.price?.currency ?? null,
+
   historical_low: itad?.historyLow?.all?.amount ?? null,
   historical_low_currency: itad?.historyLow?.all?.currency ?? null,
   historical_low_distance_pct: null,
 
-  best_store: null,
-  best_store_price: null,
+  best_store: bestItadDeal?.shop?.name ?? null,
+  best_store_price: bestItadDeal?.price?.amount ?? null,
+  best_store_currency: bestItadDeal?.price?.currency ?? null,
 
   wishlist_days: daysOnWishlist,
   evaluated_at: now.toISOString(),
