@@ -12,6 +12,7 @@ const {
 
 const DEAL_SCORE_THRESHOLD = 8;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
+const MIN_HISTORY_DAYS_FOR_LOW = 14;
 const DRY_RUN_DEAL_ALERTS = false;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
@@ -745,12 +746,6 @@ async function main() {
         : 0;
 
       const itad = currentItadPrices.get(item.appId);
-
-            // Steam historical low from our own snapshots.
-      // Require at least 14 days of history before trusting the low —
-      // without this gate, a game we've only ever seen at one price
-      // looks like it's "at its historical low" on cold start.
-      const MIN_HISTORY_DAYS_FOR_LOW = 14;
 
       const lowRecord = steamLowByAppId.get(item.appId);
       let effectiveSteamLow = null;
