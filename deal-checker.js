@@ -961,7 +961,7 @@ for (const item of toCheck) {
   price_score: 0,
   historical_low_score: buyScoreData.historicalLowScore,
   affordability_score: buyScoreData.affordabilityScore,
-  cross_store_score: 0,
+  cross_store_score: buyScoreData.crossStoreScore,
 
   current_price: currentPrice,
   current_store: 'Steam',
