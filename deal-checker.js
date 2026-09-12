@@ -728,7 +728,7 @@ function calculateBuyScore({
   }
 
   // ------------------------------------------------------------
-  // 2. Discount depth — 3.0 points
+  // 2. Discount depth — 4.0 points
   // Deeper discounts are increasingly valuable.
   // ------------------------------------------------------------
 
@@ -737,7 +737,7 @@ function calculateBuyScore({
 
   if (Number.isFinite(discountPct)) {
     if (discountPct >= 70) {
-      discountScore = 3.0;
+      discountScore = 4.0;
     } else if (discountPct >= 60) {
       discountScore = 2.75;
     } else if (discountPct >= 50) {
@@ -754,11 +754,11 @@ function calculateBuyScore({
   }
 
   // ------------------------------------------------------------
-  // 3. Personal interest — 2.0 points
+  // 3. Personal interest — 1.5 points
   // Being on the user's Steam wishlist is the primary signal.
   // ------------------------------------------------------------
 
-  const wishlistScore = 2.0;
+  const wishlistScore = 1.5;
 
   // ------------------------------------------------------------
   // 4. Wishlist persistence — 0.5 points
@@ -781,7 +781,7 @@ function calculateBuyScore({
   }
 
   // ------------------------------------------------------------
-  // 5. Cross-store advantage — 1.0 point
+  // 5. Cross-store advantage — 0.5 point
   // Reward a substantially better tracked-store price.
   // Only compare prices when currencies match.
   // ------------------------------------------------------------
@@ -800,11 +800,11 @@ function calculateBuyScore({
       ((steamItadPrice - bestNonSteamItadPrice) / steamItadPrice) * 100;
 
     if (savingsPct >= 20) {
-      crossStoreScore = 1.0;
+      crossStoreScore = 0.5;
     } else if (savingsPct >= 10) {
-      crossStoreScore = 0.7;
+      crossStoreScore = 0.35;
     } else if (savingsPct >= 5) {
-      crossStoreScore = 0.4;
+      crossStoreScore = 0.2;
     }
   }
 
