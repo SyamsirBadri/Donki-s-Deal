@@ -1,5 +1,6 @@
 const https = require('https');
 const http = require('http');
+const zlib = require('zlib');
 
 const {
   STEAM_API_KEY,
@@ -16,7 +17,8 @@ const MIN_HISTORY_DAYS_FOR_LOW = 14;
 const DRY_RUN_DEAL_ALERTS = false;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
-const STEAM_BATCH_SIZE = 40;
+const STEAM_BATCH_SIZE = 20;
+const STEAM_BATCH_DELAY_MS = 2000;
 
 const STEAM_ITAD_SHOP_ID = 61;
 const DEFAULT_TRACKED_ITAD_SHOP_IDS = new Set([STEAM_ITAD_SHOP_ID, 6, 35, 37]);
@@ -78,15 +80,28 @@ function fetchJson(url) {
         'Accept': 'application/json',
       },
     }, (res) => {
+      // Steam (and some other APIs) gzip large responses, including
+      // error bodies. Without this, HTTP 4xx/5xx bodies print as
+      // binary garbage and we can't see the real error.
+      let stream = res;
+      const encoding = res.headers['content-encoding'];
+      if (encoding === 'gzip') {
+        stream = res.pipe(zlib.createGunzip());
+        stream.on('error', (e) => reject(new Error(redact(`gunzip failed for ${url}: ${e.message}`))));
+      } else if (encoding === 'deflate') {
+        stream = res.pipe(zlib.createInflate());
+        stream.on('error', (e) => reject(new Error(redact(`inflate failed for ${url}: ${e.message}`))));
+      }
+
       let data = '';
-      res.on('data', (chunk) => (data += chunk));
-      res.on('end', () => {
+      stream.on('data', (chunk) => (data += chunk));
+      stream.on('end', () => {
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(redact(`HTTP ${res.statusCode} from ${url}: ${data.slice(0, 200)}`)));
+          reject(new Error(redact(`HTTP ${res.statusCode} from ${url}: ${data.slice(0, 300)}`)));
           return;
         }
         try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error(redact(`JSON parse error from ${url}: ${data.slice(0, 200)}`))); }
+        catch (e) { reject(new Error(redact(`JSON parse error from ${url}: ${data.slice(0, 300)}`))); }
       });
     });
     req.on('error', (e) => reject(new Error(redact(e.message))));
@@ -308,12 +323,19 @@ async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
 
   const rows = wishlist.map((item) => {
     const game = gameDataByAppId.get(item.appId);
-    return {
+    const row = {
       app_id: item.appId,
-      game_name: game?.title || `App ${item.appId}`,
       added_at: item.addedAt,
       last_synced: new Date().toISOString(),
     };
+    // Only include game_name if we have a real title. Omitting it
+    // leaves the existing DB value untouched (upsert only updates
+    // the columns present in the row) instead of blanking it with
+    // "App 12345" when Steam prices fail.
+    if (game?.title) {
+      row.game_name = game.title;
+    }
+    return row;
   });
 
   await supabaseUpsert('wishlist', rows, 'app_id');
@@ -339,24 +361,21 @@ async function fetchAllSteamPrices(appIds) {
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
+    let data = await fetchSteamBatch(batch, i + 1, batches.length);
 
-    // `filters` trims the response to just what we use. If Steam ever
-    // rejects the filter, remove it — the default payload also works,
-    // it's just larger.
-    const url =
-      `https://store.steampowered.com/api/appdetails` +
-      `?appids=${batch.join(',')}&cc=my` +
-      `&filters=basic,price_overview,release_date`;
-
-    let data;
-    try {
-      data = await fetchJson(url);
-    } catch (e) {
-      console.warn(`Steam batch ${i + 1}/${batches.length} failed: ${redact(e.message)}`);
-      // Fall through: games in this batch just won't be in the map.
+    // One retry after a longer pause — covers transient rate limits.
+    if (!data) {
+      console.warn(`  Retrying batch ${i + 1} after 5s...`);
+      await new Promise((r) => setTimeout(r, 5000));
+      data = await fetchSteamBatch(batch, i + 1, batches.length);
     }
 
-    if (data) {
+    if (!data) {
+      console.warn(`  Batch ${i + 1} failed twice; skipping ${batch.length} games.`);
+      // No fallback to single-appid here yet — see if the retry
+      // succeeds first. If a batch genuinely can't be fetched,
+      // we'll know from the log and can add a fallback.
+    } else {
       for (const appId of batch) {
         const entry = data?.[appId];
         if (!entry?.data?.name) {
@@ -367,9 +386,6 @@ async function fetchAllSteamPrices(appIds) {
         const priceOverview = entry.data.price_overview;
 
         if (!priceOverview) {
-          // Log why — previously this was collapsed into a generic
-          // "no game data" warning. Distinguishing these three cases
-          // makes the logs far easier to read.
           const isComingSoon = entry.data.release_date?.coming_soon === true;
           const isFree = entry.data.is_free === true;
           if (isComingSoon) {
@@ -401,13 +417,28 @@ async function fetchAllSteamPrices(appIds) {
       }
     }
 
-    // Sleep between batches, not after the last one.
     if (i < batches.length - 1) {
-      await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
+      await new Promise((r) => setTimeout(r, STEAM_BATCH_DELAY_MS));
     }
   }
 
   return result;
+}
+
+async function fetchSteamBatch(batch, index, total) {
+  // No `filters` param — it's a known source of 400s when combined
+  // with multiple appids. The full response is larger but reliable,
+  // and we only read the fields we need.
+  const url =
+    `https://store.steampowered.com/api/appdetails` +
+    `?appids=${batch.join(',')}&cc=my`;
+
+  try {
+    return await fetchJson(url);
+  } catch (e) {
+    console.warn(`Steam batch ${index}/${total} failed: ${redact(e.message)}`);
+    return null;
+  }
 }
 
 // ─── ITAD Current Prices ───────────────────────────────────────
