@@ -12,7 +12,9 @@ const {
 
 const DEAL_SCORE_THRESHOLD = 7;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
-const DRY_RUN_DEAL_ALERTS = true;
+const DRY_RUN_DEAL_ALERTS = false;
+const LIVE_TEST_APP_ID = 2198800;
+const REQUEST_TIMEOUT_MS = 10000;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
 
@@ -1162,7 +1164,10 @@ for (const deal of itad?.trackedDeals || []) {
 //
 // Discord sending itself remains protected by DRY_RUN_DEAL_ALERTS.
 
-if (buyDecision.recommendation === 'buy') {
+if (
+  buyDecision.recommendation === 'buy' &&
+  item.appId === LIVE_TEST_APP_ID
+) {
   const lastNotification = cooldownMap.get(item.appId);
 
   const cooldownExpired =
