@@ -940,10 +940,19 @@ for (const item of toCheck) {
     );
 
     const bestItadDeal = itadDeals.length
-      ? itadDeals.reduce((best, deal) =>
-          deal.price.amount < best.price.amount ? deal : best
-        )
-      : null;
+  ? itadDeals.reduce((best, deal) => {
+      if (!best) return deal;
+
+      // Only compare prices when they are in the same currency.
+      if (deal.price.currency !== best.price.currency) {
+        return best;
+      }
+
+      return deal.price.amount < best.price.amount
+        ? deal
+        : best;
+    }, null)
+  : null;
 
     const buyScoreData = calculateBuyScore({
   currentPrice,
