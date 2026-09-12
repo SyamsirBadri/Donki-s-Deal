@@ -673,16 +673,14 @@ function calculateBuyScore({
   currentPrice,
   daysOnWishlist,
   discountPct,
+  itadCurrentPrice,
+  itadHistoricalLow,
 }) {
   // 1. Wishlist desire
-  // The longer a game has stayed on the wishlist,
-  // the stronger the evidence that we actually want it.
   const wishlistScore =
     Math.min(daysOnWishlist / 365, 1) * 3;
 
-  // 2. Absolute price
-  // Lower prices are easier buys.
-  // This is deliberately independent of discount percentage.
+  // 2. Absolute Steam price
   let affordabilityScore = 0;
 
   if (currentPrice <= 20) {
@@ -699,8 +697,7 @@ function calculateBuyScore({
     affordabilityScore = 0.5;
   }
 
-  // 3. Discount
-  // Discount is only supporting evidence.
+  // 3. Discount is supporting evidence only.
   let discountScore = 0;
 
   if (discountPct >= 50) {
@@ -713,10 +710,34 @@ function calculateBuyScore({
     discountScore = 0.2;
   }
 
+  // 4. Historical-low proximity.
+  // Both values are ITAD prices in the same currency.
+  let historicalLowScore = 0;
+
+  if (
+    Number.isFinite(itadCurrentPrice) &&
+    Number.isFinite(itadHistoricalLow) &&
+    itadHistoricalLow > 0
+  ) {
+    const distancePct =
+      ((itadCurrentPrice - itadHistoricalLow) / itadHistoricalLow) * 100;
+
+    if (distancePct <= 5) {
+      historicalLowScore = 2;
+    } else if (distancePct <= 15) {
+      historicalLowScore = 1.5;
+    } else if (distancePct <= 30) {
+      historicalLowScore = 1;
+    } else if (distancePct <= 50) {
+      historicalLowScore = 0.5;
+    }
+  }
+
   const rawScore =
     wishlistScore +
     affordabilityScore +
-    discountScore;
+    discountScore +
+    historicalLowScore;
 
   const buyScore = Math.max(0, Math.min(10, rawScore));
 
@@ -725,6 +746,7 @@ function calculateBuyScore({
     wishlistScore,
     affordabilityScore,
     discountScore,
+    historicalLowScore,
   };
 }
 
@@ -859,13 +881,13 @@ for (const item of toCheck) {
       (now - new Date(item.addedAt)) / 86400000
     );
 
-    const itad = currentItadPrices.get(item.appId);
-
     const buyScoreData = calculateBuyScore({
-      currentPrice,
-      daysOnWishlist,
-      discountPct,
-    });
+  currentPrice,
+  daysOnWishlist,
+  discountPct,
+  itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
+  itadHistoricalLow: itad?.historyLow?.all?.amount ?? null,
+});
 
     const itadDeals = (itad?.trackedDeals || []).filter(
   (deal) =>
@@ -889,7 +911,7 @@ const bestItadDeal = itadDeals.length
 
   wishlist_score: buyScoreData.wishlistScore,
   price_score: 0,
-  historical_low_score: 0,
+  historical_low_score: buyScoreData.historicalLowScore,
   affordability_score: buyScoreData.affordabilityScore,
   cross_store_score: 0,
 
@@ -901,7 +923,14 @@ const bestItadDeal = itadDeals.length
 
   historical_low: itad?.historyLow?.all?.amount ?? null,
   historical_low_currency: itad?.historyLow?.all?.currency ?? null,
-  historical_low_distance_pct: null,
+  historical_low_distance_pct:
+  Number.isFinite(bestItadDeal?.price?.amount) &&
+  Number.isFinite(itad?.historyLow?.all?.amount) &&
+  itad.historyLow.all.amount > 0
+    ? ((bestItadDeal.price.amount - itad.historyLow.all.amount) /
+        itad.historyLow.all.amount) *
+      100
+    : null,
 
   best_store: bestItadDeal?.shop?.name ?? null,
   best_store_price: bestItadDeal?.price?.amount ?? null,
