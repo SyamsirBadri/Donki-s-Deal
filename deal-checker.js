@@ -885,6 +885,7 @@ for (const item of toCheck) {
   current_store: 'Steam',
 
   historical_low: itad?.historyLow?.all?.amount ?? null,
+  historical_low_currency: itad?.historyLow?.all?.currency ?? null,
   historical_low_distance_pct: null,
 
   best_store: null,
