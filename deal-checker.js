@@ -321,26 +321,37 @@ async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
 
   console.log(`Syncing ${wishlist.length} wishlist games to Supabase...`);
 
-  const rows = wishlist.map((item) => {
-    const game = gameDataByAppId.get(item.appId);
-    const row = {
-      app_id: item.appId,
-      added_at: item.addedAt,
-      last_synced: new Date().toISOString(),
-    };
-    // Only include game_name if we have a real title. Omitting it
-    // leaves the existing DB value untouched (upsert only updates
-    // the columns present in the row) instead of blanking it with
-    // "App 12345" when Steam prices fail.
-    if (game?.title) {
-      row.game_name = game.title;
-    }
-    return row;
-  });
+  const nowIso = new Date().toISOString();
 
-  await supabaseUpsert('wishlist', rows, 'app_id');
+  // Upsert 1 — always runs. Every row has identical keys
+  // (app_id, added_at, last_synced) so PostgREST accepts the batch.
+  // PostgREST rejects bulk upserts where objects have differing keys.
+  const baseRows = wishlist.map((item) => ({
+    app_id: item.appId,
+    added_at: item.addedAt,
+    last_synced: nowIso,
+  }));
+  await supabaseUpsert('wishlist', baseRows, 'app_id');
 
-  console.log(`Wishlist sync complete: ${rows.length} synced`);
+  // Upsert 2 — only rows where Steam returned a real title.
+  // Keeps the existing game_name untouched when Steam fails for a
+  // game, so a partial Steam outage can't blank out the table.
+  const nameRows = wishlist
+    .map((item) => {
+      const game = gameDataByAppId.get(item.appId);
+      if (!game?.title) return null;
+      return { app_id: item.appId, game_name: game.title };
+    })
+    .filter(Boolean);
+
+  if (nameRows.length > 0) {
+    await supabaseUpsert('wishlist', nameRows, 'app_id');
+  }
+
+  console.log(
+    `Wishlist sync complete: ${baseRows.length} synced ` +
+    `(${nameRows.length} names updated)`
+  );
 }
 
 // ─── Steam Store Price (Malaysia, single-appid) ────────────────
