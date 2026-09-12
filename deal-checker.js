@@ -10,7 +10,7 @@ const {
   ITAD_API_KEY,
 } = process.env;
 
-const DEAL_SCORE_THRESHOLD = 6;
+const DEAL_SCORE_THRESHOLD = 8;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
@@ -955,7 +955,10 @@ for (const item of toCheck) {
   itad_game_id: itadIdByAppId.get(item.appId) ?? null,
 
   buy_score: buyScoreData.buyScore,
-  recommendation: 'watch',
+  recommendation:
+  buyScoreData.buyScore >= DEAL_SCORE_THRESHOLD
+    ? 'buy'
+    : 'watch',
 
   wishlist_score: buyScoreData.wishlistScore,
   price_score: 0,
