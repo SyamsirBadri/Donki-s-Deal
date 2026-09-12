@@ -826,10 +826,9 @@ function calculateBuyScore({
     crossStoreScore +
     discountScore;
 
-  const buyScore = Math.max(
-    0,
-    Math.min(10, rawScore)
-  );
+  const buyScore = Math.round(
+  Math.max(0, Math.min(10, rawScore)) * 100
+) / 100;
 
   return {
     buyScore,
