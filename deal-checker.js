@@ -1163,10 +1163,7 @@ for (const deal of itad?.trackedDeals || []) {
 //
 // Discord sending itself remains protected by DRY_RUN_DEAL_ALERTS.
 
-if (
-  buyDecision.recommendation === 'buy' &&
-  item.appId === LIVE_TEST_APP_ID
-) {
+if (buyDecision.recommendation === 'buy') {
   const lastNotification = cooldownMap.get(item.appId);
 
   const cooldownExpired =
