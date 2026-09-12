@@ -675,6 +675,7 @@ function calculateBuyScore({
   discountPct,
   itadCurrentPrice,
   itadHistoricalLow,
+  itadDealsForScoring,
 }) {
   // 1. Wishlist desire
   const wishlistScore =
@@ -939,12 +940,13 @@ for (const item of toCheck) {
       : null;
 
     const buyScoreData = calculateBuyScore({
-      currentPrice,
-      daysOnWishlist,
-      discountPct,
-      itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
-      itadHistoricalLow: itad?.historyLow?.all?.amount ?? null,
-    });
+  currentPrice,
+  daysOnWishlist,
+  discountPct,
+  itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
+  itadHistoricalLow: itad?.historyLow?.all?.amount ?? null,
+  itadDealsForScoring: itadDeals,
+});
     
     const buyDecision = {
   app_id: item.appId,
