@@ -16,7 +16,18 @@ const DRY_RUN_DEAL_ALERTS = false;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
 
+// ITAD shop IDs we specifically track for cross-store price comparison.
+// 61 = Steam. Cross-reference the others against your `tracked_stores`
+// table (or api.isthereanydeal.com/service/shops/v1) if you need names.
+const STEAM_ITAD_SHOP_ID = 61;
+const TRACKED_ITAD_SHOP_IDS = new Set([STEAM_ITAD_SHOP_ID, 6, 35, 37]);
+
 // ─── Startup validation ────────────────────────────────────────
+// ITAD_API_KEY is required here, not optional: wishlist-to-ITAD matching,
+// historical lows, and current cross-store prices all depend on it and
+// will throw and abort the run if it's missing. Only the third-party
+// (Fanatical/Humble/etc.) free-game check treats it as optional, since
+// that source is a nice-to-have rather than part of the core deal flow.
 function assertEnv() {
   const required = {
     STEAM_API_KEY,
@@ -24,6 +35,7 @@ function assertEnv() {
     DISCORD_WEBHOOK_URL,
     SUPABASE_URL,
     SUPABASE_SERVICE_KEY,
+    ITAD_API_KEY,
   };
   const missing = Object.entries(required)
     .filter(([, v]) => !v)
@@ -31,6 +43,28 @@ function assertEnv() {
   if (missing.length > 0) {
     throw new Error(`Missing required environment variable(s): ${missing.join(', ')}`);
   }
+}
+
+// ─── Secret redaction ──────────────────────────────────────────
+// Several URLs we build (Steam wishlist call, ITAD calls, the Discord
+// webhook itself) carry a secret inline. If a request fails, the raw URL
+// can end up inside an Error message that gets console.error'd — this
+// strips known secret values out of any string before it's logged.
+// (GitHub Actions also masks registered secrets in log output, but that's
+// a safety net, not a reason to leak them into error text in the first place.)
+const SECRETS_TO_REDACT = [
+  STEAM_API_KEY,
+  ITAD_API_KEY,
+  DISCORD_WEBHOOK_URL,
+  SUPABASE_SERVICE_KEY,
+].filter(Boolean);
+
+function redact(str) {
+  let out = str;
+  for (const secret of SECRETS_TO_REDACT) {
+    out = out.split(secret).join('[REDACTED]');
+  }
+  return out;
 }
 
 // ─── HTTP Helpers ──────────────────────────────────────────────
@@ -47,15 +81,15 @@ function fetchJson(url) {
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`HTTP ${res.statusCode} from ${url}: ${data.slice(0, 200)}`));
+          reject(new Error(redact(`HTTP ${res.statusCode} from ${url}: ${data.slice(0, 200)}`)));
           return;
         }
         try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error(`JSON parse error from ${url}: ${data.slice(0, 200)}`)); }
+        catch (e) { reject(new Error(redact(`JSON parse error from ${url}: ${data.slice(0, 200)}`))); }
       });
     });
-    req.on('error', reject);
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Request timed out: ${url}`)));
+    req.on('error', (e) => reject(new Error(redact(e.message))));
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(redact(`Request timed out: ${url}`))));
   });
 }
 
@@ -75,8 +109,8 @@ function postJson(url, body) {
       res.on('data', (c) => (resData += c));
       res.on('end', () => resolve({ status: res.statusCode, body: resData }));
     });
-    req.on('error', reject);
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Request timed out: ${url}`)));
+    req.on('error', (e) => reject(new Error(redact(e.message))));
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(redact(`Request timed out: ${url}`))));
     req.write(data);
     req.end();
   });
@@ -101,7 +135,7 @@ function supabaseRequest(method, path, { body, headers = {} } = {}) {
       res.on('data', (c) => (resData += c));
       res.on('end', () => {
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`Supabase ${method} ${path} -> HTTP ${res.statusCode}: ${resData.slice(0, 300)}`));
+          reject(new Error(redact(`Supabase ${method} ${path} -> HTTP ${res.statusCode}: ${resData.slice(0, 300)}`)));
           return;
         }
         if (!resData) { resolve(null); return; }
@@ -109,8 +143,8 @@ function supabaseRequest(method, path, { body, headers = {} } = {}) {
         catch { resolve(resData); }
       });
     });
-    req.on('error', reject);
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Supabase request timed out: ${path}`)));
+    req.on('error', (e) => reject(new Error(redact(e.message))));
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(redact(`Supabase request timed out: ${path}`))));
     if (data) req.write(data);
     req.end();
   });
@@ -151,25 +185,6 @@ async function getWishlist() {
         : null,
     }))
     .filter((i) => i.appId);
-}
-
-// ─── ITAD Game Lookup ─────────────────────────────────────────
-async function lookupItadGame(appId) {
-  const url =
-    `https://api.isthereanydeal.com/games/lookup/v1` +
-    `?key=${encodeURIComponent(ITAD_API_KEY)}` +
-    `&appid=${encodeURIComponent(appId)}`;
-
-  const data = await fetchJson(url);
-
-  if (!data?.found || !data?.game?.id) {
-    return null;
-  }
-
-  return {
-    id: data.game.id,
-    title: data.game.title || null,
-  };
 }
 
 async function matchWishlistGamesToItad(wishlist) {
@@ -283,7 +298,13 @@ async function matchWishlistGamesToItad(wishlist) {
 }
 
 // ─── Wishlist Database Sync ───────────────────────────────────
-async function syncWishlistToDatabase(wishlist) {
+// `gameDataByAppId` is the Map already built in main() by the single
+// Steam-price-fetch pass — this function makes no network calls of its
+// own. (Previously this re-fetched every game's price/title from Steam
+// a second time just to read the title, doubling both the request count
+// and the per-item rate-limit delay for no benefit — the title was the
+// only thing used from that second call.)
+async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
   if (wishlist.length === 0) {
     console.log('Wishlist is empty — nothing to sync.');
     return;
@@ -291,46 +312,19 @@ async function syncWishlistToDatabase(wishlist) {
 
   console.log(`Syncing ${wishlist.length} wishlist games to Supabase...`);
 
-  const rows = [];
-  let failed = 0;
-
-  for (const item of wishlist) {
-    try {
-      // Steam's wishlist endpoint gives us the app ID and date added,
-      // but not the game title. Reuse the existing Steam Store API
-      // helper to retrieve the title.
-      const game = await getGamePrice(item.appId);
-
-      rows.push({
-        app_id: item.appId,
-        game_name: game?.title || `App ${item.appId}`,
-        added_at: item.addedAt,
-        last_synced: new Date().toISOString(),
-      });
-
-      console.log(
-        `  Prepared: ${game?.title || `App ${item.appId}`}`
-      );
-    } catch (e) {
-      failed++;
-      console.warn(
-        `  Failed to prepare wishlist app ${item.appId}: ${e.message}`
-      );
-    }
-
-    await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
-  }
-
-  if (rows.length === 0) {
-    console.log('No wishlist rows could be prepared.');
-    return;
-  }
+  const rows = wishlist.map((item) => {
+    const game = gameDataByAppId.get(item.appId);
+    return {
+      app_id: item.appId,
+      game_name: game?.title || `App ${item.appId}`,
+      added_at: item.addedAt,
+      last_synced: new Date().toISOString(),
+    };
+  });
 
   await supabaseUpsert('wishlist', rows, 'app_id');
 
-  console.log(
-    `Wishlist sync complete: ${rows.length} synced, ${failed} failed`
-  );
+  console.log(`Wishlist sync complete: ${rows.length} synced`);
 }
 
 // ─── Steam Store Price (Malaysia) ──────────────────────────────
@@ -500,7 +494,7 @@ console.log('ITAD current-price stores:', storeCounts);
     games.map((game) => [game.itad_game_id, game.app_id])
   );
 
-    const trackedShopIds = new Set([61, 6, 35, 37]);
+    const trackedShopIds = TRACKED_ITAD_SHOP_IDS;
 
   for (const result of Array.isArray(results) ? results : []) {
     const appId = itadToAppId.get(result?.id);
@@ -596,22 +590,16 @@ async function getEpicFreebies() {
 
 // Third-party keyshops (Fanatical, Humble Store, GOG, etc.) via
 // IsThereAnyDeal — a different service from gg.deals/CheapShark, so the
-// block you're hitting on those two shouldn't apply here.
+// block you're hitting on those two shouldn't apply here. ITAD_API_KEY is
+// validated as required in assertEnv(), so no separate presence check is
+// needed here.
 //
-// Needs a free API key from https://isthereanydeal.com/apps/my/ — set
-// ITAD_API_KEY in your environment. If unset, this source just skips
-// itself; everything else still runs.
-//
-// NOTE: I could not hit this endpoint live to confirm its current
-// response shape (verify against docs.isthereanydeal.com if this logs
-// a shape warning or comes back empty when you know a deal is live).
+// NOTE: this endpoint's response shape (list vs. deals, nesting of
+// deal/shop/cut) was not confirmed against a live call while writing this.
+// Trigger it during a known-active third-party freebie and check the logs
+// below — a silent "0 non-Steam free deals" result with no warning could
+// mean the shape assumption is wrong, not that nothing's free right now.
 async function getThirdPartyFreebies() {
-  const { ITAD_API_KEY } = process.env;
-  if (!ITAD_API_KEY) {
-    console.log('ITAD_API_KEY not set — skipping third-party (Fanatical/Humble/etc.) freebie check');
-    return [];
-  }
-
   const url = `https://api.isthereanydeal.com/deals/v2?key=${ITAD_API_KEY}&country=MY&limit=200`;
   let data;
   try {
@@ -658,16 +646,22 @@ async function getFreeGames() {
 }
 
 // ─── Buy Scoring ────────────────────────────────────────────────
-// V1.1 Buy Score:
+// V1.1 Buy Score — reflects what's actually implemented below:
 //
-// Absolute price          3 points
-// Historical price        3 points
-// Personal interest       2 points
-// Discount                1 point
-// Cross-store advantage   0.5 points
-// Wishlist persistence    0.5 points
+// Historical-low proximity     up to 3.5 points
+// Discount depth                up to 4.0 points
+// Personal interest (wishlist)  flat 1.5 points
+// Wishlist persistence          up to 0.5 points
+// Exceptional deep-discount bonus up to 0.5 points
 //
-// Total                   10 points
+// Total                         10 points
+//
+// Affordability and cross-store advantage are computed/stored as
+// informational fields (affordability_score, cross_store_score,
+// best_store/best_store_price) but do NOT currently add to the score —
+// they're reserved for a future scoring pass rather than dead intent.
+// If you want them to actually score, they need real weight here, not
+// just a hardcoded 0.
 //
 // The goal is:
 // "Is this a good purchase for me right now?"
@@ -681,6 +675,10 @@ async function getFreeGames() {
 // - Steam current price is MYR.
 // - ITAD prices/history are compared only when their currencies match.
 // - No manual currency conversion is performed.
+//
+// Recommendation tiering (buy/watch) is decided by the caller in main()
+// against DEAL_SCORE_THRESHOLD, not in here — this function only returns
+// the raw score and its components.
 
 function calculateBuyScore({
   currentPrice,
@@ -816,17 +814,11 @@ function calculateBuyScore({
     )
   );
 
-  let recommendation = 'skip';
-
-  if (buyScore >= 8) {
-    recommendation = 'buy';
-  } else if (buyScore >= 5) {
-    recommendation = 'watch';
-  }
+  // Recommendation tiering happens in main() against DEAL_SCORE_THRESHOLD,
+  // not here — see the comment block above this function.
 
   return {
     buyScore,
-    recommendation,
     wishlistScore,
     historicalLowScore,
     discountScore,
@@ -864,9 +856,29 @@ try {
   process.exit(1);
 }
 
+// 1a. Fetch Steam price/title data once per wishlist game.
+// This single pass feeds both the Supabase sync below (which only needs
+// the title) and the buy-score evaluation loop further down (which needs
+// the full price/discount data) — so each game only costs one Steam
+// Store API call and one rate-limit delay per run, not two.
+const gameDataByAppId = new Map();
+for (const item of wishlist) {
+  try {
+    const game = await getGamePrice(item.appId);
+    if (game) {
+      gameDataByAppId.set(item.appId, game);
+    } else {
+      console.warn(`Skipping ${item.appId}: Steam price lookup returned no game data`);
+    }
+  } catch (e) {
+    console.warn(`Failed to fetch Steam data for app ${item.appId}: ${e.message}`);
+  }
+  await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
+}
+
 // 1b. Sync wishlist to Supabase
 try {
-  await syncWishlistToDatabase(wishlist);
+  await syncWishlistToDatabase(wishlist, gameDataByAppId);
 } catch (e) {
   console.error('Failed to sync wishlist to Supabase:', e.message);
   process.exit(1);
@@ -955,18 +967,19 @@ const currentItadPrices = await getItadCurrentPrices(
     Array.isArray(lastNotified) ? lastNotified.map((r) => [r.app_id, new Date(r.last_notification)]) : []
   );
 
+  // 4. Prepare accumulators for this run's snapshots and alerts
   const newSnapshots = [];
   const alerts = [];
 
- // 5. Check each game
+  // 5. Check each game
+  // Reuses the Steam price data fetched once in step 1a — no repeat
+  // Steam Store API calls or delays needed here.
 for (const item of toCheck) {
   try {
-    const game = await getGamePrice(item.appId);
+    const game = gameDataByAppId.get(item.appId);
 
 if (!game) {
-  console.warn(
-    `Skipping ${item.appId}: Steam price lookup returned no game data`
-  );
+  // Already logged as a warning in step 1a when the lookup failed.
   continue;
 }
 
@@ -1001,11 +1014,11 @@ if (!game) {
   : null;
 
     const steamItadDeal = itadDeals.find(
-  (deal) => deal?.shop?.id === 61
+  (deal) => deal?.shop?.id === STEAM_ITAD_SHOP_ID
 );
 
 const nonSteamItadDeals = itadDeals.filter(
-  (deal) => deal?.shop?.id !== 61
+  (deal) => deal?.shop?.id !== STEAM_ITAD_SHOP_ID
 );
 
 const bestNonSteamItadDeal = nonSteamItadDeals.reduce(
@@ -1070,18 +1083,9 @@ const buyScoreData = calculateBuyScore({
 
   historical_low: itad?.historyLow?.all?.amount ?? null,
   historical_low_currency: itad?.historyLow?.all?.currency ?? null,
-  historical_low_distance_pct:
-  Number.isFinite(Number(bestItadDeal?.price?.amount)) &&
-  Number.isFinite(Number(itad?.historyLow?.all?.amount)) &&
-  Number(itad?.historyLow?.all?.amount) > 0 &&
-  bestItadDeal?.price?.currency &&
-  itad?.historyLow?.all?.currency &&
-  bestItadDeal.price.currency === itad.historyLow.all.currency
-    ? ((Number(bestItadDeal.price.amount) -
-        Number(itad.historyLow.all.amount)) /
-        Number(itad.historyLow.all.amount)) *
-      100
-    : null,
+  // Reuse the value calculateBuyScore() already derived from the same
+  // inputs, instead of recomputing the same formula a second time here.
+  historical_low_distance_pct: buyScoreData.historicalLowDistancePct,
 
   best_store: bestItadDeal?.shop?.name ?? null,
   best_store_price: bestItadDeal?.price?.amount ?? null,
@@ -1105,7 +1109,7 @@ newSnapshots.push({
   app_id: item.appId,
   game_name: game.title,
   itad_game_id: itadIdByAppId.get(item.appId) ?? null,
-  itad_shop_id: 61,
+  itad_shop_id: STEAM_ITAD_SHOP_ID,
   price_source: 'steam',
   store: game.storeName.toLowerCase(),
   current_price: currentPrice,
@@ -1124,7 +1128,7 @@ newSnapshots.push({
 
 // Save tracked-store prices from ITAD
 for (const deal of itad?.trackedDeals || []) {
-  if (deal?.shop?.id === 61) {
+  if (deal?.shop?.id === STEAM_ITAD_SHOP_ID) {
   continue;
 }
   const shopId = deal?.shop?.id;
@@ -1201,8 +1205,6 @@ if (buyDecision.recommendation === 'buy') {
     } catch (e) {
       console.warn(`Error checking app ${item.appId}: ${e.message}`);
     }
-
-    await new Promise((r) => setTimeout(r, WISHLIST_REQUEST_DELAY_MS));
   }
 
   // 6. Check free games — Steam-wide, Epic, and third-party keyshops,
