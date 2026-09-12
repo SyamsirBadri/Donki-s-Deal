@@ -786,12 +786,13 @@ if (
   const buyScore = Math.max(0, Math.min(10, rawScore));
 
   return {
-    buyScore,
-    wishlistScore,
-    affordabilityScore,
-    discountScore,
-    historicalLowScore,
-  };
+  buyScore,
+  wishlistScore,
+  affordabilityScore,
+  discountScore,
+  historicalLowScore,
+  crossStoreScore,
+};
 }
 
 // ─── Discord Notification ──────────────────────────────────────
