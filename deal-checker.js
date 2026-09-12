@@ -13,14 +13,22 @@ const {
 
 const DEAL_SCORE_THRESHOLD = 8;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
+// Minimum age (in days) of a game's snapshot history before we
+// trust its Steam historical low. Prevents "at its historical low"
+// false positives during cold start, when a game has only ever
+// been observed at a single price.
 const MIN_HISTORY_DAYS_FOR_LOW = 14;
 const DRY_RUN_DEAL_ALERTS = false;
 const REQUEST_TIMEOUT_MS = 10000;
-const WISHLIST_REQUEST_DELAY_MS = 1000;
-const STEAM_BATCH_SIZE = 20;
-const STEAM_BATCH_DELAY_MS = 2000;
+// Delay between single-appid Steam requests. Steam's limit is
+// 200 requests / 5 minutes (one per 1.5s). 300ms is comfortably
+// inside that and keeps a 58-game wishlist under a minute.
+const STEAM_PER_GAME_DELAY_MS = 300;
 
 const STEAM_ITAD_SHOP_ID = 61;
+// Fallback only — used if the tracked_stores table can't be loaded.
+// The DB is the source of truth; this exists so a query failure
+// doesn't drop cross-store visibility to zero.
 const DEFAULT_TRACKED_ITAD_SHOP_IDS = new Set([STEAM_ITAD_SHOP_ID, 6, 35, 37]);
 
 // ─── Startup validation ────────────────────────────────────────
@@ -58,14 +66,6 @@ function redact(input) {
   let out = str;
   for (const secret of SECRETS_TO_REDACT) {
     out = out.split(secret).join('[REDACTED]');
-  }
-  return out;
-}
-
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) {
-    out.push(arr.slice(i, i + size));
   }
   return out;
 }
@@ -184,7 +184,7 @@ async function supabaseUpsert(table, rows, conflictColumn) {
   });
 }
 
-// Calls the Postgres function we just created.
+// Calls the Postgres function we created.
 // Returns Map<app_id, { historicalLow, firstSeen }>.
 async function getSteamPriceLows(appIds) {
   if (!Array.isArray(appIds) || appIds.length === 0) return new Map();
@@ -343,109 +343,61 @@ async function syncWishlistToDatabase(wishlist, gameDataByAppId) {
   console.log(`Wishlist sync complete: ${rows.length} synced`);
 }
 
-// ─── Steam Store Prices (Malaysia, batched) ────────────────────
-// Fetches price + title for the whole wishlist in batches, instead
-// of one HTTP request per game. Steam's appdetails endpoint accepts
-// comma-separated appids and returns an object keyed by appid string.
+// ─── Steam Store Price (Malaysia, single-appid) ────────────────
+// Batched multi-appid calls don't work: Steam requires
+// filters=price_overview for multiple appids, which strips the
+// title and release_date fields we need. Single-appid calls have
+// no such restriction and return the full payload.
 //
-// Returns Map<app_id, { title, cheapest, originalPrice, discountPct,
-//                       isOnSale, storeName, url }> — the same shape
-// the old single-game getGamePrice() returned, so downstream code
-// doesn't need to change.
-async function fetchAllSteamPrices(appIds) {
-  const result = new Map();
-  if (!Array.isArray(appIds) || appIds.length === 0) return result;
+// Rate limit is 200 requests / 5 minutes — one every 1.5s. The
+// STEAM_PER_GAME_DELAY_MS delay between requests here is
+// comfortably inside that.
+async function getGamePrice(appId) {
+  const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=my&l=english`;
+  const data = await fetchJson(url);
+  const entry = data?.[appId];
 
-  const batches = chunk(appIds, STEAM_BATCH_SIZE);
-  console.log(`Steam price fetch: ${appIds.length} games in ${batches.length} batch(es)`);
+  // Steam wraps every response in a success envelope. HTTP 200 does
+  // NOT mean the appid resolved; entry.success can be false.
+  if (!entry?.success || !entry.data?.name) return null;
 
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    let data = await fetchSteamBatch(batch, i + 1, batches.length);
+  const priceOverview = entry.data.price_overview;
 
-    // One retry after a longer pause — covers transient rate limits.
-    if (!data) {
-      console.warn(`  Retrying batch ${i + 1} after 5s...`);
-      await new Promise((r) => setTimeout(r, 5000));
-      data = await fetchSteamBatch(batch, i + 1, batches.length);
+  if (!priceOverview) {
+    const isComingSoon = entry.data.release_date?.coming_soon === true;
+    const isFree = entry.data.is_free === true;
+    if (isComingSoon) {
+      return { _skipReason: 'coming_soon', title: entry.data.name };
     }
-
-    if (!data) {
-      console.warn(`  Batch ${i + 1} failed twice; skipping ${batch.length} games.`);
-      // No fallback to single-appid here yet — see if the retry
-      // succeeds first. If a batch genuinely can't be fetched,
-      // we'll know from the log and can add a fallback.
-    } else {
-      for (const appId of batch) {
-        const entry = data?.[appId];
-        if (!entry?.data?.name) {
-          console.log(`  No Steam data for ${appId}`);
-          continue;
-        }
-
-        const priceOverview = entry.data.price_overview;
-
-        if (!priceOverview) {
-          const isComingSoon = entry.data.release_date?.coming_soon === true;
-          const isFree = entry.data.is_free === true;
-          if (isComingSoon) {
-            console.log(`  Coming soon (no price yet): ${appId} — ${entry.data.name}`);
-          } else if (isFree) {
-            console.log(`  Free-to-play: ${appId} — ${entry.data.name}`);
-          } else {
-            console.log(`  No Steam-MY price: ${appId} — ${entry.data.name}`);
-          }
-          continue;
-        }
-
-        const currentPrice = priceOverview.final / 100;
-        const originalPrice = priceOverview.initial / 100;
-        const discountPct = priceOverview.discount_percent || 0;
-
-        if (!Number.isFinite(currentPrice) || currentPrice < 0) continue;
-        if (!Number.isFinite(originalPrice) || originalPrice <= 0) continue;
-
-        result.set(Number(appId), {
-          title: entry.data.name,
-          cheapest: currentPrice,
-          originalPrice,
-          discountPct,
-          isOnSale: discountPct > 0,
-          storeName: 'Steam',
-          url: `https://store.steampowered.com/app/${appId}`,
-        });
-      }
+    if (isFree) {
+      return { _skipReason: 'free_to_play', title: entry.data.name };
     }
-
-    if (i < batches.length - 1) {
-      await new Promise((r) => setTimeout(r, STEAM_BATCH_DELAY_MS));
-    }
+    return { _skipReason: 'no_price', title: entry.data.name };
   }
 
-  return result;
-}
+  const currentPrice = priceOverview.final / 100;
+  const originalPrice = priceOverview.initial / 100;
+  const discountPct = priceOverview.discount_percent || 0;
 
-async function fetchSteamBatch(batch, index, total) {
-  // No `filters` param — it's a known source of 400s when combined
-  // with multiple appids. The full response is larger but reliable,
-  // and we only read the fields we need.
-  const url =
-    `https://store.steampowered.com/api/appdetails` +
-    `?appids=${batch.join(',')}&cc=my`;
+  if (!Number.isFinite(currentPrice) || currentPrice < 0) return null;
+  if (!Number.isFinite(originalPrice) || originalPrice <= 0) return null;
 
-  try {
-    return await fetchJson(url);
-  } catch (e) {
-    console.warn(`Steam batch ${index}/${total} failed: ${redact(e.message)}`);
-    return null;
-  }
+  return {
+    title: entry.data.name,
+    cheapest: currentPrice,
+    originalPrice,
+    discountPct,
+    isOnSale: discountPct > 0,
+    storeName: 'Steam',
+    url: `https://store.steampowered.com/app/${appId}`,
+  };
 }
 
 // ─── ITAD Current Prices ───────────────────────────────────────
 // Returns Map<app_id, { historyLow, trackedDeals, rawDeals }>.
-// `trackedDeals` is filtered to TRACKED_ITAD_SHOP_IDS and deduped
-// per-shop (cheapest per store). `rawDeals` is everything ITAD sent,
-// used for the informational "other stores" line in Discord.
+// `trackedDeals` is filtered to the provided set of shop IDs and
+// deduped per-shop (cheapest per store). `rawDeals` is everything
+// ITAD sent, used for the informational "other stores" line.
 async function getItadCurrentPrices(wishlistRows, trackedShopIds) {
   const map = new Map();
 
@@ -480,7 +432,7 @@ async function getItadCurrentPrices(wishlistRows, trackedShopIds) {
     const appId = itadToAppId.get(result?.id);
     if (!appId) continue;
 
-        const trackedDealsByShop = new Map();
+    const trackedDealsByShop = new Map();
     for (const deal of result?.deals || []) {
       const shopId = deal?.shop?.id;
       if (!trackedShopIds.has(shopId)) continue;
@@ -607,7 +559,7 @@ async function getFreeGames() {
 //
 // Cold start: if we have no Steam historical low yet for a game, the
 // historical-low component contributes 0. Scores cap at 6.5/10 until
-// ~30 days of snapshots exist. Nothing is seeded — we only score what
+// ~14 days of snapshots exist. Nothing is seeded — we only score what
 // we've actually observed.
 //
 // Cross-store prices are NOT scored. They appear in the Discord embed
@@ -732,19 +684,29 @@ async function main() {
     process.exit(1);
   }
 
-  // 1a. Fetch Steam price/title data for the whole wishlist in batches.
-  let gameDataByAppId;
-  try {
-    gameDataByAppId = await fetchAllSteamPrices(wishlist.map((w) => w.appId));
-  } catch (e) {
-    console.error('Failed to fetch Steam prices:', redact(e.message));
-    process.exit(1);
+  // 1a. Fetch Steam price/title data per wishlist game.
+  // Steam rejects multi-appid requests unless filters=price_overview,
+  // which strips the title and release_date fields we need. Single-appid
+  // calls have no such restriction, so we go one at a time with a short
+  // delay — well inside Steam's 200-req/5-min limit.
+  const gameDataByAppId = new Map();
+
+  for (const item of wishlist) {
+    try {
+      const game = await getGamePrice(item.appId);
+      if (game?._skipReason) {
+        console.log(`  Skipping ${item.appId} (${game._skipReason}): ${game.title || 'unknown'}`);
+      } else if (game) {
+        gameDataByAppId.set(item.appId, game);
+      } else {
+        console.warn(`  No Steam data for ${item.appId}`);
+      }
+    } catch (e) {
+      console.warn(`Failed to fetch Steam data for app ${item.appId}: ${redact(e.message)}`);
+    }
+    await new Promise((r) => setTimeout(r, STEAM_PER_GAME_DELAY_MS));
   }
-  if (gameDataByAppId.size === 0) {
-    console.warn('No Steam prices fetched — check the batch logs above.');
-  } else {
-    console.log(`Steam prices fetched: ${gameDataByAppId.size}/${wishlist.length}`);
-  }
+  console.log(`Steam prices fetched: ${gameDataByAppId.size}/${wishlist.length}`);
 
   // 1b. Sync wishlist to Supabase
   try {
@@ -863,6 +825,10 @@ async function main() {
 
       const itad = currentItadPrices.get(item.appId);
 
+      // Steam historical low from our own snapshots.
+      // The 14-day gate (MIN_HISTORY_DAYS_FOR_LOW, defined at the top)
+      // stops cold-start false positives: a game we've only ever seen
+      // at one price shouldn't look like it's "at its historical low."
       const lowRecord = steamLowByAppId.get(item.appId);
       let effectiveSteamLow = null;
       if (lowRecord) {
