@@ -698,20 +698,20 @@ function calculateBuyScore({
   let affordabilityScore = 0;
 
   if (Number.isFinite(currentPrice) && currentPrice >= 0) {
-    if (currentPrice <= 20) {
-      affordabilityScore = 3;
-    } else if (currentPrice <= 40) {
-      affordabilityScore = 2.5;
-    } else if (currentPrice <= 60) {
-      affordabilityScore = 2;
-    } else if (currentPrice <= 100) {
-      affordabilityScore = 1.5;
-    } else if (currentPrice <= 150) {
-      affordabilityScore = 1;
-    } else if (currentPrice <= 200) {
-      affordabilityScore = 0.5;
-    }
+  if (currentPrice <= 20) {
+    affordabilityScore = 3;
+  } else if (currentPrice <= 40) {
+    affordabilityScore = 2.5;
+  } else if (currentPrice <= 50) {
+    affordabilityScore = 2;
+  } else if (currentPrice <= 65) {
+    affordabilityScore = 1.25;
+  } else if (currentPrice <= 100) {
+    affordabilityScore = 0.75;
+  } else if (currentPrice <= 150) {
+    affordabilityScore = 0.25;
   }
+}
 
   // 2. Historical price quality — maximum 3 points.
   //
