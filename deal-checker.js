@@ -867,6 +867,35 @@ for (const item of toCheck) {
       discountPct,
     });
 
+    const buyDecision = {
+  app_id: item.appId,
+  game_name: game.title,
+  itad_game_id: itadIdByAppId.get(item.appId) ?? null,
+
+  buy_score: buyScoreData.buyScore,
+  recommendation: 'watch',
+
+  wishlist_score: buyScoreData.wishlistScore,
+  price_score: 0,
+  historical_low_score: 0,
+  affordability_score: buyScoreData.affordabilityScore,
+  cross_store_score: 0,
+
+  current_price: currentPrice,
+  current_store: 'Steam',
+
+  historical_low: itad?.historyLow?.all?.amount ?? null,
+  historical_low_distance_pct: null,
+
+  best_store: null,
+  best_store_price: null,
+
+  wishlist_days: daysOnWishlist,
+  evaluated_at: now.toISOString(),
+};
+
+    await supabaseInsert('buy_decisions', [buyDecision]);
+
     console.log(
       `  ${game.title}: ` +
       `price=RM${currentPrice.toFixed(2)} ` +
