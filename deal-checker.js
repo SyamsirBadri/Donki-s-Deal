@@ -734,13 +734,53 @@ if (
     } else if (distancePct <= 50) {
       historicalLowScore = 0.5;
     }
+    }
+
+  // 5. Cross-store advantage.
+  // Compare the best tracked-store price against the Steam price
+  // reported by ITAD. This is a relative store comparison only;
+  // we do not convert currencies manually.
+  let crossStoreScore = 0;
+
+  const steamItadDeal = itadDealsForScoring?.find(
+    (deal) => deal?.shop?.id === 61
+  );
+
+  const bestNonSteamItadDeal = itadDealsForScoring
+    ?.filter((deal) => deal?.shop?.id !== 61)
+    ?.reduce((best, deal) => {
+      if (!best) return deal;
+
+      return deal.price.amount < best.price.amount
+        ? deal
+        : best;
+    }, null);
+
+  if (
+    steamItadDeal?.price?.amount > 0 &&
+    bestNonSteamItadDeal?.price?.amount > 0 &&
+    steamItadDeal.price.currency === bestNonSteamItadDeal.price.currency
+  ) {
+    const storeSavingsPct =
+      ((steamItadDeal.price.amount - bestNonSteamItadDeal.price.amount) /
+        steamItadDeal.price.amount) *
+      100;
+
+    if (storeSavingsPct >= 20) {
+      crossStoreScore = 1;
+    } else if (storeSavingsPct >= 10) {
+      crossStoreScore = 0.7;
+    } else if (storeSavingsPct >= 5) {
+      crossStoreScore = 0.4;
+    }
   }
 
-  const rawScore =
+    const rawScore =
     wishlistScore +
     affordabilityScore +
     discountScore +
-    historicalLowScore;
+    historicalLowScore +
+    crossStoreScore;
 
   const buyScore = Math.max(0, Math.min(10, rawScore));
 
