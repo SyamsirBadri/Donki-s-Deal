@@ -781,34 +781,30 @@ function calculateBuyScore({
   }
 
   // ------------------------------------------------------------
-  // 5. Cross-store advantage — 0.5 point
-  // Reward a substantially better tracked-store price.
-  // Only compare prices when currencies match.
+  // 5. Cross-store advantage — informational only
+  // Cross-store pricing is shown for comparison, but it does not
+  // increase the Buy Score.
   // ------------------------------------------------------------
 
-  let crossStoreScore = 0;
+  const crossStoreScore = 0;
+
+  // ------------------------------------------------------------
+  // 6. Exceptional deep-discount bonus — 0.5 points
+  // Reward an unusually deep discount when the price is also
+  // reasonably close to the historical low.
+  // ------------------------------------------------------------
+
+  let exceptionalDealScore = 0;
 
   if (
-    Number.isFinite(steamItadPrice) &&
-    Number.isFinite(bestNonSteamItadPrice) &&
-    steamItadCurrency &&
-    bestNonSteamItadCurrency &&
-    steamItadCurrency === bestNonSteamItadCurrency &&
-    steamItadPrice > 0
+    discountPct >= 70 &&
+    Number.isFinite(historicalLowDistancePct) &&
+    historicalLowDistancePct <= 30
   ) {
-    const savingsPct =
-      ((steamItadPrice - bestNonSteamItadPrice) / steamItadPrice) * 100;
-
-    if (savingsPct >= 20) {
-      crossStoreScore = 0.5;
-    } else if (savingsPct >= 10) {
-      crossStoreScore = 0.35;
-    } else if (savingsPct >= 5) {
-      crossStoreScore = 0.2;
-    }
+    exceptionalDealScore = 0.5;
   }
-
-  const buyScore = Math.min(
+  
+    const buyScore = Math.min(
     10,
     Math.max(
       0,
@@ -816,7 +812,7 @@ function calculateBuyScore({
         discountScore +
         wishlistScore +
         wishlistPersistenceScore +
-        crossStoreScore
+        exceptionalDealScore
     )
   );
 
