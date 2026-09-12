@@ -1154,8 +1154,48 @@ for (const deal of itad?.trackedDeals || []) {
   });
 }
 
-      // Deal alerts are temporarily disabled while we build the new Buy Score.
-      // Price snapshots continue to be collected normally.
+      // ─── Deal alert eligibility ────────────────────────────────────
+// Only positive Buy Score recommendations can enter the alert queue.
+//
+// Notification cooldown prevents the same game from being
+// repeatedly alerted every time the workflow runs.
+//
+// Discord sending itself remains protected by DRY_RUN_DEAL_ALERTS.
+
+if (buyDecision.recommendation === 'buy') {
+  const lastNotification = cooldownMap.get(item.appId);
+
+  const cooldownExpired =
+    !lastNotification ||
+    (now - lastNotification) >=
+      NOTIFICATION_COOLDOWN_HOURS * 60 * 60 * 1000;
+
+  if (cooldownExpired) {
+    alerts.push({
+      appId: item.appId,
+      title: game.title,
+      score: buyDecision.buy_score,
+      currentPrice,
+      originalPrice,
+      discountPct,
+      daysOnWishlist,
+      storeName: 'Steam',
+      url: game.url,
+    });
+
+    console.log(
+      `  ALERT ELIGIBLE: ${game.title} ` +
+      `(score=${buyDecision.buy_score.toFixed(2)}, ` +
+      `price=RM${currentPrice.toFixed(2)})`
+    );
+  } else {
+    console.log(
+      `  ALERT COOLDOWN: ${game.title} ` +
+      `(last notified ${lastNotification.toISOString()})`
+    );
+  }
+}
+    
     } catch (e) {
       console.warn(`Error checking app ${item.appId}: ${e.message}`);
     }
