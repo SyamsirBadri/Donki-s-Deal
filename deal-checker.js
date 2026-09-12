@@ -884,25 +884,27 @@ for (const item of toCheck) {
       (now - new Date(item.addedAt)) / 86400000
     );
 
-    const buyScoreData = calculateBuyScore({
-  currentPrice,
-  daysOnWishlist,
-  discountPct,
-  itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
-  itadHistoricalLow: itad?.historyLow?.all?.amount ?? null,
-});
+        const itad = currentItadPrices.get(item.appId);
 
     const itadDeals = (itad?.trackedDeals || []).filter(
-  (deal) =>
-    Number.isFinite(deal?.price?.amount) &&
-    deal?.price?.currency
-);
+      (deal) =>
+        Number.isFinite(deal?.price?.amount) &&
+        deal?.price?.currency
+    );
 
-const bestItadDeal = itadDeals.length
-  ? itadDeals.reduce((best, deal) =>
-      deal.price.amount < best.price.amount ? deal : best
-    )
-  : null;
+    const bestItadDeal = itadDeals.length
+      ? itadDeals.reduce((best, deal) =>
+          deal.price.amount < best.price.amount ? deal : best
+        )
+      : null;
+
+    const buyScoreData = calculateBuyScore({
+      currentPrice,
+      daysOnWishlist,
+      discountPct,
+      itadCurrentPrice: bestItadDeal?.price?.amount ?? null,
+      itadHistoricalLow: itad?.historyLow?.all?.amount ?? null,
+    });
     
     const buyDecision = {
   app_id: item.appId,
