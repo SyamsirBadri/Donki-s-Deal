@@ -2,17 +2,30 @@ name: Deal Radar - Price Checker
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # Every 2 hours
-  workflow_dispatch:  # Allows manual trigger from GitHub UI
+    - cron: '0 */2 * * *'  # Every 2 hours (UTC)
+  workflow_dispatch:        # Manual trigger from GitHub UI
+
+# Least-privilege token. The job only reads the repo.
+permissions:
+  contents: read
+
+# Serialize runs so an overrunning job can't overlap with the next
+# scheduled tick and send duplicate alerts.
+concurrency:
+  group: deal-radar
+  cancel-in-progress: false
 
 jobs:
   check-deals:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
+    timeout-minutes: 20
 
-      - uses: actions/setup-node@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
         with:
           node-version: '24'
 
@@ -24,5 +37,21 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ITAD_API_KEY: ${{ secrets.ITAD_API_KEY }}
+          # Pin the timezone so Date() math in the script is deterministic
+          # regardless of the runner's locale.
+          TZ: 'Asia/Kuala_Lumpur'
+        run: node deal-checker_experimental_v2.js
+
+      - name: Notify Discord on failure
+        if: failure()
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          node deal-checker.js
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "DISCORD_WEBHOOK_URL not set; skipping failure notification."
+            exit 0
+          fi
+          curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"⚠️ Deal Radar run failed. Check GitHub Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
