@@ -12,6 +12,7 @@ const {
 
 const DEAL_SCORE_THRESHOLD = 7;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
+const DRY_RUN_DEAL_ALERTS = true;
 const REQUEST_TIMEOUT_MS = 10000;
 const WISHLIST_REQUEST_DELAY_MS = 1000;
 
@@ -1187,25 +1188,44 @@ for (const deal of itad?.trackedDeals || []) {
   }
 
   // 8. Send deal alerts
-  for (const alert of alerts) {
-    const embed = {
-      title: `DEAL: ${alert.title}`,
-      description: [
-        `**Score:** ${alert.score.toFixed(2)}/10`,
-        `**Price:** RM${alert.currentPrice.toFixed(2)} (was RM${alert.originalPrice.toFixed(2)}, ${alert.discountPct}% off)`,
-        `**Store:** ${alert.storeName}`,
-        `**On wishlist:** ${alert.daysOnWishlist} days`,
-      ].join('\n'),
-      color: 0x00ff00,
-      url: alert.url,
-    };
-    try {
-      await sendDiscordAlert(`Deal Score ${alert.score.toFixed(2)}`, [embed]);
-      await supabaseUpsert('last_notified', [{ app_id: alert.appId, last_notification: now.toISOString() }], 'app_id');
-    } catch (e) {
-      console.warn(`Failed to send/record alert for ${alert.title}: ${e.message}`);
-    }
+for (const alert of alerts) {
+  const embed = {
+    title: `DEAL: ${alert.title}`,
+    description: [
+      `**Score:** ${alert.score.toFixed(2)}/10`,
+      `**Price:** RM${alert.currentPrice.toFixed(2)} (was RM${alert.originalPrice.toFixed(2)}, ${alert.discountPct}% off)`,
+      `**Store:** ${alert.storeName}`,
+      `**On wishlist:** ${alert.daysOnWishlist} days`,
+    ].join('\n'),
+    color: 0x00ff00,
+    url: alert.url,
+  };
+
+  if (DRY_RUN_DEAL_ALERTS) {
+    console.log(
+      `DRY RUN — would send deal alert: ${alert.title} ` +
+      `(score=${alert.score.toFixed(2)}, price=RM${alert.currentPrice.toFixed(2)})`
+    );
+    continue;
   }
+
+  try {
+    await sendDiscordAlert(`Deal Score ${alert.score.toFixed(2)}`, [embed]);
+
+    await supabaseUpsert(
+      'last_notified',
+      [{
+        app_id: alert.appId,
+        last_notification: now.toISOString(),
+      }],
+      'app_id'
+    );
+  } catch (e) {
+    console.warn(
+      `Failed to send/record alert for ${alert.title}: ${e.message}`
+    );
+  }
+}
 
   console.log(`Done. ${alerts.length} deal alert(s) sent.`);
 }
