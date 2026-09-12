@@ -159,7 +159,8 @@ async function supabaseUpsert(table, rows, conflictColumn) {
   });
 }
 
-// Calls the Postgres function we just created. Returns Map<app_id, lowest_steam_price_myr>.
+// Calls the Postgres function we just created.
+// Returns Map<app_id, { historicalLow, firstSeen }>.
 async function getSteamPriceLows(appIds) {
   if (!Array.isArray(appIds) || appIds.length === 0) return new Map();
   const rows = await supabaseRequest('POST', 'rpc/get_steam_price_lows', {
@@ -167,8 +168,16 @@ async function getSteamPriceLows(appIds) {
   });
   const map = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
-    if (row && row.app_id != null && Number.isFinite(Number(row.historical_low))) {
-      map.set(row.app_id, Number(row.historical_low));
+    if (
+      row &&
+      row.app_id != null &&
+      Number.isFinite(Number(row.historical_low)) &&
+      row.first_seen
+    ) {
+      map.set(row.app_id, {
+        historicalLow: Number(row.historical_low),
+        firstSeen: new Date(row.first_seen),
+      });
     }
   }
   return map;
@@ -737,11 +746,20 @@ async function main() {
 
       const itad = currentItadPrices.get(item.appId);
 
-      // Steam historical low from our own snapshots, with the
-      // current price included so a same-day new low is recognised.
-      const dbLow = steamLowByAppId.get(item.appId);
-      const effectiveSteamLow =
-        dbLow === undefined ? null : Math.min(dbLow, currentPrice);
+            // Steam historical low from our own snapshots.
+      // Require at least 14 days of history before trusting the low —
+      // without this gate, a game we've only ever seen at one price
+      // looks like it's "at its historical low" on cold start.
+      const MIN_HISTORY_DAYS_FOR_LOW = 14;
+
+      const lowRecord = steamLowByAppId.get(item.appId);
+      let effectiveSteamLow = null;
+      if (lowRecord) {
+        const historyDays = (now - lowRecord.firstSeen) / 86400000;
+        if (historyDays >= MIN_HISTORY_DAYS_FOR_LOW) {
+          effectiveSteamLow = Math.min(lowRecord.historicalLow, currentPrice);
+        }
+      }
 
       // Best non-Steam ITAD deal (informational only)
       const nonSteamDeals = (itad?.rawDeals || []).filter(
