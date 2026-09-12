@@ -669,31 +669,62 @@ async function getFreeGames() {
 // can never be below allTimeLow — a naive (1 - currentPrice/allTimeLow)
 // ratio is therefore always <= 0 and can never reward a real discount,
 // which is why every score floored at 0 before this fix.
-function calculateDealScore({ currentPrice, originalPrice, daysOnWishlist }) {
-  const discountFactor =
-    originalPrice > 0
-      ? Math.max(0, Math.min(1, 1 - currentPrice / originalPrice)) * 2
-      : 0;
+function calculateBuyScore({
+  currentPrice,
+  daysOnWishlist,
+  discountPct,
+}) {
+  // 1. Wishlist desire
+  // The longer a game has stayed on the wishlist,
+  // the stronger the evidence that we actually want it.
+  const wishlistScore =
+    Math.min(daysOnWishlist / 365, 1) * 3;
 
-  const patienceFactor =
-    Math.min(daysOnWishlist / 365, 1) * 1;
+  // 2. Absolute price
+  // Lower prices are easier buys.
+  // This is deliberately independent of discount percentage.
+  let affordabilityScore = 0;
 
-  // Temporary currency-safe score.
-  // We will replace this entire scoring system with Buy Score later.
-  const priceFactor = 0;
+  if (currentPrice <= 20) {
+    affordabilityScore = 3;
+  } else if (currentPrice <= 40) {
+    affordabilityScore = 2.5;
+  } else if (currentPrice <= 60) {
+    affordabilityScore = 2;
+  } else if (currentPrice <= 100) {
+    affordabilityScore = 1.5;
+  } else if (currentPrice <= 150) {
+    affordabilityScore = 1;
+  } else if (currentPrice <= 200) {
+    affordabilityScore = 0.5;
+  }
+
+  // 3. Discount
+  // Discount is only supporting evidence.
+  let discountScore = 0;
+
+  if (discountPct >= 50) {
+    discountScore = 1;
+  } else if (discountPct >= 30) {
+    discountScore = 0.7;
+  } else if (discountPct >= 15) {
+    discountScore = 0.4;
+  } else if (discountPct > 0) {
+    discountScore = 0.2;
+  }
 
   const rawScore =
-    priceFactor +
-    discountFactor +
-    patienceFactor;
+    wishlistScore +
+    affordabilityScore +
+    discountScore;
 
-  const score = Math.max(0, Math.min(10, rawScore));
+  const buyScore = Math.max(0, Math.min(10, rawScore));
 
   return {
-    score,
-    priceFactor,
-    discountFactor,
-    patienceFactor,
+    buyScore,
+    wishlistScore,
+    affordabilityScore,
+    discountScore,
   };
 }
 
@@ -815,26 +846,34 @@ const currentItadPrices = await getItadCurrentPrices(
   const newSnapshots = [];
   const alerts = [];
 
-  // 5. Check each game
-  for (const item of toCheck) {
-    try {
-      const game = await getGamePrice(item.appId);
-      if (!game) continue;
+ // 5. Check each game
+for (const item of toCheck) {
+  try {
+    const game = await getGamePrice(item.appId);
+    if (!game) continue;
 
-      const currentPrice = game.cheapest;
-const originalPrice = game.originalPrice;
-const discountPct = game.discountPct;
-const daysOnWishlist = Math.floor((now - new Date(item.addedAt)) / 86400000);
+    const currentPrice = game.cheapest;
+    const originalPrice = game.originalPrice;
+    const discountPct = game.discountPct;
+    const daysOnWishlist = Math.floor(
+      (now - new Date(item.addedAt)) / 86400000
+    );
 
-const itad = currentItadPrices.get(item.appId);
+    const itad = currentItadPrices.get(item.appId);
 
-console.log(
-  `  ${game.title}: ` +
-  `price=RM${currentPrice.toFixed(2)} ` +
-  `orig=RM${originalPrice.toFixed(2)} ` +
-  `disc=${discountPct}% ` +
-  `wishlist=${daysOnWishlist}d`
-);
+    const buyScoreData = calculateBuyScore({
+      currentPrice,
+      daysOnWishlist,
+      discountPct,
+    });
+
+    console.log(
+      `  ${game.title}: ` +
+      `price=RM${currentPrice.toFixed(2)} ` +
+      `orig=RM${originalPrice.toFixed(2)} ` +
+      `disc=${discountPct}% ` +
+      `wishlist=${daysOnWishlist}d`
+    );
       
 newSnapshots.push({
   app_id: item.appId,
