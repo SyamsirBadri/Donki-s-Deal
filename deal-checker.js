@@ -993,7 +993,13 @@ const currentItadPrices = await getItadCurrentPrices(
 for (const item of toCheck) {
   try {
     const game = await getGamePrice(item.appId);
-    if (!game) continue;
+
+if (!game) {
+  console.warn(
+    `Skipping ${item.appId}: Steam price lookup returned no game data`
+  );
+  continue;
+}
 
     const currentPrice = game.cheapest;
     const originalPrice = game.originalPrice;
