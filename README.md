@@ -19,7 +19,7 @@ Every 2 hours, a GitHub Action runs a Node.js script that:
 - Records every price observation to Supabase for historical analysis
 
 The goal isn't "notify me about every sale" — Steam already does that.  
-The goal is: **notify me when a game is genuinely near its historical low, so I stop checking manually.**
+The goal is: **notify me when a game is genuinely near its historical low so I stop checking manually.**
 
 ---
 
@@ -90,7 +90,7 @@ Database tables: `wishlist`, `price_snapshots`, `buy_decisions`, `purchased`, `l
 ## Known limitations
 
 - **Historical lows are tracker-observed, not all-time.** The low is the minimum price seen since this tracker started running. A game that went 80% off in 2023 and hasn't repeated won't be recognized as near its true historical low.
-- **Regional pricing is real.** Steam MYR prices can differ significantly from Steam USD prices for the same game. The score uses MYR exclusively.
+- **Regional pricing is a pain in the arse.** Steam MYR prices can differ significantly from Steam USD prices for the same game. The score uses MYR exclusively.
 - **Coming-soon games have no price.** They're tracked for release but skipped in scoring until Steam returns pricing.
 - **ITAD's historical low is all-store, USD-only.** Useful as context, not used in scoring.
 
