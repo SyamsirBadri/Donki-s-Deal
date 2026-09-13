@@ -13,22 +13,12 @@ const {
 
 const DEAL_SCORE_THRESHOLD = 8;
 const NOTIFICATION_COOLDOWN_HOURS = 24;
-// Minimum age (in days) of a game's snapshot history before we
-// trust its Steam historical low. Prevents "at its historical low"
-// false positives during cold start, when a game has only ever
-// been observed at a single price.
 const MIN_HISTORY_DAYS_FOR_LOW = 14;
 const DRY_RUN_DEAL_ALERTS = false;
 const REQUEST_TIMEOUT_MS = 10000;
-// Delay between single-appid Steam requests. Steam's limit is
-// 200 requests / 5 minutes (one per 1.5s). 300ms is comfortably
-// inside that and keeps a 58-game wishlist under a minute.
 const STEAM_PER_GAME_DELAY_MS = 300;
-
 const STEAM_ITAD_SHOP_ID = 61;
 // Fallback only — used if the tracked_stores table can't be loaded.
-// The DB is the source of truth; this exists so a query failure
-// doesn't drop cross-store visibility to zero.
 const DEFAULT_TRACKED_ITAD_SHOP_IDS = new Set([STEAM_ITAD_SHOP_ID, 6, 35, 37]);
 
 // ─── Startup validation ────────────────────────────────────────
@@ -80,9 +70,6 @@ function fetchJson(url) {
         'Accept': 'application/json',
       },
     }, (res) => {
-      // Steam (and some other APIs) gzip large responses, including
-      // error bodies. Without this, HTTP 4xx/5xx bodies print as
-      // binary garbage and we can't see the real error.
       let stream = res;
       const encoding = res.headers['content-encoding'];
       if (encoding === 'gzip') {
@@ -184,7 +171,7 @@ async function supabaseUpsert(table, rows, conflictColumn) {
   });
 }
 
-// Calls the Postgres function we created.
+// Calls the Postgres function.
 // Returns Map<app_id, { historicalLow, firstSeen }>.
 async function getSteamPriceLows(appIds) {
   if (!Array.isArray(appIds) || appIds.length === 0) return new Map();
@@ -296,7 +283,7 @@ async function matchWishlistGamesToItad(wishlist) {
     } else {
       updates.push({
         app_id: item.appId,
-        itad_game_id: null, // ← explicit null, not undefined
+        itad_game_id: null, // xplicit null, not undefined
         itad_match_status: 'failed',
         itad_match_source: 'steam_appid',
       });
@@ -313,10 +300,6 @@ async function matchWishlistGamesToItad(wishlist) {
 }
 
 // ─── Wishlist Database Sync ───────────────────────────────────
-// `namesByAppId` maps app_id → real title from Steam. Populated
-// from both priced games and skip-reason games (coming soon,
-// free-to-play), so wishlist rows get canonical Steam names even
-// before a game has a price.
 async function syncWishlistToDatabase(wishlist, namesByAppId) {
   if (wishlist.length === 0) {
     console.log('Wishlist is empty — nothing to sync.');
@@ -327,9 +310,6 @@ async function syncWishlistToDatabase(wishlist, namesByAppId) {
 
   const nowIso = new Date().toISOString();
 
-  // Upsert 1 — always runs. Every row has identical keys
-  // (app_id, added_at, last_synced) so PostgREST accepts the batch.
-  // PostgREST rejects bulk upserts where objects have differing keys.
   const baseRows = wishlist.map((item) => ({
     app_id: item.appId,
     added_at: item.addedAt,
@@ -337,8 +317,6 @@ async function syncWishlistToDatabase(wishlist, namesByAppId) {
   }));
   await supabaseUpsert('wishlist', baseRows, 'app_id');
 
-  // Upsert 2 — only rows where Steam returned a title. Uniform
-  // keys here too, so it's a separate call from the base rows.
   const nameRows = wishlist
     .map((item) => {
       const title = namesByAppId.get(item.appId);
@@ -362,17 +340,11 @@ async function syncWishlistToDatabase(wishlist, namesByAppId) {
 // filters=price_overview for multiple appids, which strips the
 // title and release_date fields we need. Single-appid calls have
 // no such restriction and return the full payload.
-//
-// Rate limit is 200 requests / 5 minutes — one every 1.5s. The
-// STEAM_PER_GAME_DELAY_MS delay between requests here is
-// comfortably inside that.
 async function getGamePrice(appId) {
   const url = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=my&l=english`;
   const data = await fetchJson(url);
   const entry = data?.[appId];
 
-  // Steam wraps every response in a success envelope. HTTP 200 does
-  // NOT mean the appid resolved; entry.success can be false.
   if (!entry?.success || !entry.data?.name) return null;
 
   const priceOverview = entry.data.price_overview;
@@ -408,10 +380,6 @@ async function getGamePrice(appId) {
 }
 
 // ─── ITAD Current Prices ───────────────────────────────────────
-// Returns Map<app_id, { historyLow, trackedDeals, rawDeals }>.
-// `trackedDeals` is filtered to the provided set of shop IDs and
-// deduped per-shop (cheapest per store). `rawDeals` is everything
-// ITAD sent, used for the informational "other stores" line.
 async function getItadCurrentPrices(wishlistRows, trackedShopIds) {
   const map = new Map();
 
