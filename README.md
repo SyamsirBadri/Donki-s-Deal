@@ -49,14 +49,16 @@ The historical-low component requires observed history. Until a game has **14 da
 - Alerts simply don't fire until the tracker has enough data
 - No misleading "at its historical low!" pings from a game that's only ever been seen once
 
----
-
 ## Data flow
-Steam Wishlist API ──┐
-Steam Store API ─────┼──→ deal-checker.js ──→ Supabase (price_snapshots, buy_decisions)
-ITAD API ────────────┘ └──→ Discord (alerts)
 
----
+```mermaid
+flowchart LR
+    A[Steam Wishlist API] --> D[deal-checker.js]
+    B[Steam Store API] --> D
+    C[ITAD API] --> D
+    D --> E[(Supabase)]
+    D --> F[Discord]
+```
 
 ## Stack
 
