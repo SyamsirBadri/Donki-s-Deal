@@ -3,9 +3,8 @@ name: Deal Radar - Price Checker
 on:
   schedule:
     - cron: '0 */2 * * *'  # Every 2 hours (UTC)
-  workflow_dispatch:        # Manual trigger from GitHub UI
+  workflow_dispatch:        # Manual trigger from GitHub Action UI
 
-# Least-privilege token. The job only reads the repo.
 permissions:
   contents: read
 
@@ -37,8 +36,6 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ITAD_API_KEY: ${{ secrets.ITAD_API_KEY }}
-          # Pin the timezone so Date() math in the script is deterministic
-          # regardless of the runner's locale.
           TZ: 'Asia/Kuala_Lumpur'
         run: node deal-checker.js
 
