@@ -43,9 +43,9 @@ Alerts fire when score ≥ 8, with a 24-hour cooldown per game.
 
 ## Cold-start behavior
 
-The historical-low component requires observed history. Until a game has **14 days** of Steam-MY price snapshots, its low is treated as unknown and the component contributes 0 points. This means:
+The historical-low component requires observed history. Until a game has **a few weeks** of Steam-MY price snapshots, its low is treated as unknown and the component contributes 0 points. This means:
 
-- During the first 14 days, no game can score above 6.5
+- During the first few weeks, no game can score above 6.5
 - Alerts simply don't fire until the tracker has enough data
 - No misleading "at its historical low!" pings from a game that's only ever been seen once
 
