@@ -1,6 +1,6 @@
 # Donki's Deal
 
-Personal Steam wishlist tracker that scores deals and pings Discord when something is actually worth buying — not just when it's on sale.
+Personal Steam wishlist tracker that scores deals and pings Discord when something is actually worth buying, not just when it's on sale.
 
 ![Deal Radar workflow](https://github.com/SyamsirBadri/Donki-s-Deal/actions/workflows/deal-checker.yml/badge.svg)
 
@@ -18,7 +18,7 @@ Every 2 hours, a GitHub Action runs a Node.js script that:
 - Tracks free game giveaways across Steam, Epic, and ITAD
 - Records every price observation to Supabase for historical analysis
 
-The goal isn't "notify me about every sale" — Steam already does that.  
+The goal isn't "notify me about every sale". Steam already does that.  
 The goal is: **notify me when a game is genuinely near its historical low so I stop checking manually.**
 
 ---
@@ -92,7 +92,7 @@ Database tables: `wishlist`, `price_snapshots`, `buy_decisions`, `purchased`, `l
 - **Historical lows are tracker-observed, not all-time.** The low is the minimum price seen since this tracker started running. A game that went 80% off in 2023 and hasn't repeated won't be recognized as near its true historical low.
 - **Regional pricing is a pain in the arse.** Steam MYR prices can differ significantly from Steam USD prices for the same game. The score uses MYR exclusively.
 - **Coming-soon games have no price.** They're tracked for release but skipped in scoring until Steam returns pricing.
-- **ITAD's historical low is all-store, USD-only.** Useful as context, not used in scoring.
+- **ITAD's historical low is all-store, USD-only.** Not used in scoring, but useful as context.
 
 ---
 
