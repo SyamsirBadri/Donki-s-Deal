@@ -104,4 +104,6 @@ I wanted a personal deal tracker that:
 2. Doesn't alert me for a "sale" that's still 300% above the game's real low
 3. Actually knows the difference between **on sale** and **at its best price**
 
-Steam's built-in wishlist notifications don't do any of that. This does.
+## Help me improve this project
+
+There are so many things I want to improve, but I feel limited by my own creativity. This project was also my first time using GitHub extensively and learn many of its features, so I made plenty of missteps along the way. Any suggestions or contributions will be greatly appreciated.
